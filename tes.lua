@@ -1,21 +1,21 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==================================================
--- PROJECT ZEEN TOOLS v1.0.0 (MAJOR UPDATE)
+-- PROJECT ZEEN TOOLS v1.0.1 (MINOR UPDATE)
 -- Auto Grid Freeform - Monitoring Edition
 -- ==================================================
--- Changelog v1.0.0:
--- [+] UI: Real-time Monitoring Table
--- [+] Ratio Layout: 1:2 (1 Kiri : 2 Kanan)
--- [+] State Machine: Auto Launch & Recovery
--- [+] Color Coding: Green (Online/Ready), Red (Retry)
--- [+] Auto Detect Roblox Username
+-- Changelog v1.0.1:
+-- [+] UI: Solid Table (Box Drawing) - No Broken Lines
+-- [+] Optimization: Anti-Flicker Display (Smooth Refresh)
+-- [+] Logic: Cyclic Monitoring (15s per App Loop)
+-- [+] Deep Search: Better Username Detection
 -- ==================================================
 
 -- KONFIGURASI
-local STATUS_BAR_HEIGHT = 60 -- Safety margin (pixel)
-local REFRESH_RATE = 0.5     -- Kecepatan refresh UI (detik)
-local RAM_UPDATE_INTERVAL = 10 -- Update RAM tiap 10 loop (biar ringan)
+local STATUS_BAR_HEIGHT = 60
+local MONITOR_SWITCH_TIME = 15 -- Detik (Waktu ganti fokus monitoring)
+local REFRESH_RATE = 0.2       -- Detik (Update UI lebih cepat & smooth)
+local RAM_UPDATE_INTERVAL = 20 -- Update RAM tiap 20 refresh
 
 -- File paths
 local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
@@ -25,10 +25,13 @@ local TEMP_SCRIPT = "/data/data/com.termux/files/home/.temp_cmd.sh"
 local packages = {} 
 local DISPLAY_WIDTH = 1280 
 local DISPLAY_HEIGHT = 720 
+
+-- Monitoring Variables
 local current_monitoring_index = 1
+local monitor_timer = 0        -- Timer hitung mundur pindah app
 local loop_counter = 0
 
--- Warna ANSI (Terminal Colors)
+-- Warna ANSI
 local C_RESET  = "\27[0m"
 local C_RED    = "\27[31m"
 local C_GREEN  = "\27[32m"
@@ -37,6 +40,7 @@ local C_BLUE   = "\27[34m"
 local C_CYAN   = "\27[36m"
 local C_WHITE  = "\27[37m"
 local C_BOLD   = "\27[1m"
+local C_DIM    = "\27[2m"
 
 -- ================= HELPER FUNCTIONS =================
 
@@ -75,45 +79,47 @@ function updateScreenResolution()
     end
 end
 
--- ================= CORE LOGIC v1.0.0 =================
+-- ================= CORE LOGIC v1.0.1 =================
 
--- Get Roblox Username (From XML/Cache)
+-- [IMPROVED] Deep Search Username
 function getRobloxUsername(pkgName)
-    local cmd = "grep -r \"UserName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
+    -- Mencari file XML yang mengandung DisplayName di seluruh folder shared_prefs
+    -- Kita menggunakan grep recursive (-r)
+    local cmd = "grep -r \"DisplayName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
     local raw = exec(cmd)
-    local user = raw:match("value=\"([^\"]+)\"")
     
+    -- Coba parsing DisplayName
+    local user = raw:match("DisplayName\"[^>]*>([^<]+)<") 
+    if not user then user = raw:match("value=\"([^\"]+)\"") end
+
     if not user or user == "" then
-        cmd = "grep -r \"DisplayName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
+        -- Cadangan: Cari UserName
+        cmd = "grep -r \"UserName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
         raw = exec(cmd)
-        user = raw:match("value=\"([^\"]+)\"")
+        user = raw:match("UserName\"[^>]*>([^<]+)<")
+        if not user then user = raw:match("value=\"([^\"]+)\"") end
     end
+    
     return (user and user ~= "") and user or "Unknown"
 end
 
--- Get RAM Usage
 function getRamUsage(pkgName)
     local raw = exec("dumpsys meminfo " .. pkgName .. " | grep 'TOTAL'")
     local kb = raw:match("%s*(%d+)%s*")
     return kb and (math.floor(tonumber(kb) / 1024) .. " MB") or "0 MB"
 end
 
--- Optimize System (Kill bg apps)
 function optimizeSystem()
     exec("pm trim-caches 100M")
 end
 
--- LAYOUT 1:2 CALCULATION
+-- LAYOUT 1:2
 function getGridPositions(numApps)
     local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
     local h_slot = math.floor(usable_height / 3)
-    
-    -- RASIO 1:2 (Total 3 Bagian)
-    -- Kiri: 1 Bagian (33.3%) | Kanan: 2 Bagian (66.6%)
     local grid_width = math.floor(DISPLAY_WIDTH * (2/3))
     local start_x = DISPLAY_WIDTH - grid_width
     local w_slot = math.floor(grid_width / 2)
-    
     local y1, y2, y3 = STATUS_BAR_HEIGHT, STATUS_BAR_HEIGHT + h_slot, STATUS_BAR_HEIGHT + (h_slot*2)
     local b1, b2, b3 = y1 + h_slot, y2 + h_slot, DISPLAY_HEIGHT 
     
@@ -127,20 +133,15 @@ function getGridPositions(numApps)
     }
 end
 
--- Modify Preferences
 function modifyPrefs(package, position, numApps)
     local grid = getGridPositions(numApps)
     local pos = grid[position]
     if not pos then return end
-    
     local cloneId = package:match("clien([%w]+)$") or "z1"
     local findCmd = "ls /data/data/" .. package .. "/shared_prefs/*.xml 2>/dev/null | grep -i pref"
     local foundFiles = exec(findCmd)
     local prefFile = foundFiles:match("([^\n]+_preferences%.xml)") or foundFiles:match("([^\n]+)")
-    
-    if not prefFile then 
-        prefFile = "/data/data/"..package.."/shared_prefs/com.roblox.clien"..cloneId.."_preferences.xml"
-    end
+    if not prefFile then prefFile = "/data/data/"..package.."/shared_prefs/com.roblox.clien"..cloneId.."_preferences.xml" end
     
     local cmds = {
         string.format("sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_left\\\" value=\\\"%d\\\"/' '%s'", pos.left, prefFile),
@@ -151,135 +152,142 @@ function modifyPrefs(package, position, numApps)
     for _, cmd in ipairs(cmds) do exec(cmd) end
 end
 
--- ================= DASHBOARD UI =================
+-- ================= BUFFERED UI (ANTI-FLICKER) =================
 
 function drawDashboard()
-    io.write("\27[2J\27[H") -- Clear Screen
+    -- Gunakan buffer string untuk menampung semua text
+    -- \27[H memindahkan kursor ke pojok kiri atas TANPA menghapus layar (Anti-flicker)
+    local buffer = "\27[H" 
     
-    print(C_CYAN .. C_BOLD)
-    print("███████╗███████╗███████╗███╗   ██╗")
-    print("╚══███╔╝██╔════╝██╔════╝████╗  ██║")
-    print("  ███╔╝ █████╗  █████╗  ██╔██╗ ██║")
-    print(" ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║")
-    print("███████╗███████╗███████╗██║ ╚████║")
-    print("╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝")
-    print("        ZEEN TOOLS v1.0.0         ")
-    print(C_RESET)
+    buffer = buffer .. C_CYAN .. C_BOLD .. "\n"
+    buffer = buffer .. "  ZEEN TOOLS v1.0.1 (Stable)     \n"
+    buffer = buffer .. C_RESET .. "\n"
     
-    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
-    print(string.format("%s%-3s | %-16s | %-8s | %-12s%s", C_BOLD, "No", "Nama Akun", "RAM", "Status", C_RESET))
-    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
+    -- Header Solid Table
+    buffer = buffer .. C_WHITE .. "┌────┬──────────────────┬──────────┬──────────────┐\n" .. C_RESET
+    buffer = buffer .. string.format("│ %s%-2s%s │ %-16s │ %-8s │ %-12s │\n", C_BOLD, "No", C_RESET, "Nama Akun", "RAM", "Status")
+    buffer = buffer .. C_WHITE .. "├────┼──────────────────┼──────────┼──────────────┤\n" .. C_RESET
     
+    -- Rows
     for i, pkg in ipairs(packages) do
-        -- Aturan Warna Status v1.0.0
-        local statusColor = C_WHITE -- Default (Reseting, Boosting, Optimized, Launched, Waiting)
+        local statusColor = C_WHITE
+        if pkg.status == "Online" or pkg.status == "Ready" then statusColor = C_GREEN
+        elseif pkg.status == "Retrying" then statusColor = C_RED end
         
-        if pkg.status == "Online" or pkg.status == "Ready" then
-            statusColor = C_GREEN
-        elseif pkg.status == "Retrying" then
-            statusColor = C_RED
-        end
+        -- Indikator Panah di sebelah kiri jika sedang dimonitor
+        local indicator = (i == current_monitoring_index) and (C_CYAN .. ">" .. C_RESET) or " "
         
         local displayName = pkg.real_user
         if string.len(displayName) > 14 then displayName = string.sub(displayName, 1, 13) .. "." end
         
-        print(string.format("%-3d | %-16s | %-8s | %s%-12s%s", 
-            i, displayName, pkg.ram, statusColor, pkg.status, C_RESET
-        ))
+        buffer = buffer .. string.format("│ %s%-2d%s │ %-16s │ %-8s │ %s%-12s%s │\n", 
+            indicator .. i, displayName, pkg.ram, statusColor, pkg.status, C_RESET
+        )
     end
-    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
     
+    -- Footer Solid Table
+    buffer = buffer .. C_WHITE .. "└────┴──────────────────┴──────────┴──────────────┘\n" .. C_RESET
+    
+    -- Info Bar Realtime
     local activePkg = packages[current_monitoring_index] or {}
     local progressText = activePkg.status or "Idle"
-    print(string.format("%sMonitoring: %d/%d (%s)%s", C_BOLD, current_monitoring_index, #packages, progressText, C_RESET))
-    print(C_WHITE .. "\n[CTRL+C] Stop Script" .. C_RESET)
+    local timeLeft = math.ceil(MONITOR_SWITCH_TIME - monitor_timer)
+    
+    buffer = buffer .. string.format("\n%sMonitoring: %d/%d (%s) %s| %sNext Switch: %ds   %s\n", 
+        C_BOLD, current_monitoring_index, #packages, progressText, C_RESET, 
+        C_YELLOW, timeLeft, C_RESET
+    )
+    
+    buffer = buffer .. C_DIM .. "\n[CTRL+C] Stop Script    " .. C_RESET 
+    
+    -- Print Buffer Sekaligus
+    io.write(buffer)
 end
 
--- ================= STATE MACHINE LOGIC =================
+-- ================= STATE MACHINE & LOGIC =================
 
 function processAppLogic(index, totalApps)
     local pkg = packages[index]
     
-    -- STATE MACHINE
+    -- STATE MACHINE (Hanya berjalan jika belum Online/Ready)
+    -- Jika sudah Online, fungsi ini hanya memverifikasi (Maintenance)
+    
     if pkg.state_step == 0 then
-        -- Step 0: Initial
         pkg.status = "Reseting"
         pkg.state_step = 1
         
     elseif pkg.state_step == 1 then
-        -- Step 1: Force Stop
         pkg.status = "Reseting"
         exec("am force-stop " .. pkg.package)
-        if pkg.real_user == "Scanning..." then pkg.real_user = getRobloxUsername(pkg.package) end
+        if pkg.real_user == "Scanning..." or pkg.real_user == "Unknown" then 
+            pkg.real_user = getRobloxUsername(pkg.package) 
+        end
         pkg.state_step = 2
         
     elseif pkg.state_step == 2 then
-        -- Step 2: Boosting
         pkg.status = "Boosting"
         exec("pm trim-caches 50M") 
         pkg.state_step = 3
         
     elseif pkg.state_step == 3 then
-        -- Step 3: Optimized
         pkg.status = "Optimized"
         optimizeSystem() 
         pkg.state_step = 4
         
     elseif pkg.state_step == 4 then
-        -- Step 4: Ready & Config (HIJAU)
         pkg.status = "Ready"
         modifyPrefs(pkg.package, index, totalApps)
         pkg.state_step = 5
-        -- Beri jeda sebentar di status Ready biar terlihat user
-        pkg.wait_timer = 2 
+        pkg.wait_timer = 1
         
     elseif pkg.state_step == 5 then
-        -- Step 5: Launching
         if pkg.wait_timer > 0 then
-            pkg.wait_timer = pkg.wait_timer - 1
+            pkg.wait_timer = pkg.wait_timer - REFRESH_RATE
         else
             pkg.status = "Launched"
             exec("am start " .. pkg.package)
             pkg.state_step = 6
-            pkg.wait_timer = 6 -- Tunggu 6 detik sebelum cek Online
+            pkg.wait_timer = 6 -- Waktu tunggu loading
         end
         
     elseif pkg.state_step == 6 then
-        -- Step 6: Checking Online Status (HIJAU)
         if pkg.wait_timer > 0 then
-            pkg.wait_timer = pkg.wait_timer - 1
+            pkg.wait_timer = pkg.wait_timer - REFRESH_RATE
         else
             local check = exec("pidof " .. pkg.package)
             if check and check ~= "" then
                 pkg.status = "Online"
-                -- Pindah ke app berikutnya
-                if current_monitoring_index < totalApps then
-                    current_monitoring_index = current_monitoring_index + 1
-                end
+                -- Jangan langsung pindah index disini, biarkan logic Cyclic Timer yang mengatur
             else
-                pkg.status = "Retrying" -- (MERAH)
+                pkg.status = "Retrying"
                 pkg.state_step = 1 
             end
         end
         
-    elseif pkg.state_step == 7 then
-        -- Step 7: Maintenance (Cek crash)
+    elseif pkg.state_step == 7 or pkg.status == "Online" then
+        -- Maintenance Mode
         local check = exec("pidof " .. pkg.package)
         if not check or check == "" then
-            pkg.status = "Retrying" -- (MERAH)
+            pkg.status = "Retrying"
             pkg.state_step = 1 
-            current_monitoring_index = index -- Fokus balik
+            -- Note: Kita tidak memaksa pindah monitoring index ke sini
+            -- agar siklus monitoring tetap terjaga. 
+            -- App ini akan diperbaiki saat gilirannya tiba atau di background check.
         else
-            pkg.status = "Online" -- (HIJAU)
+            pkg.status = "Online"
         end
     end
 end
 
--- ================= MAIN MONITORING LOOP =================
+-- ================= MAIN LOOP =================
 
 function startMonitoring()
     if #packages == 0 then print("✗ No packages!"); return end
     
+    -- Clear layar sekali di awal
+    io.write("\27[2J") 
+    
+    -- Init Data
     for i, p in ipairs(packages) do
         p.status = "Waiting"
         p.ram = "0 MB"
@@ -289,32 +297,53 @@ function startMonitoring()
     end
     
     current_monitoring_index = 1
+    monitor_timer = 0
     updateScreenResolution()
     
     while true do
         loop_counter = loop_counter + 1
         
-        -- Proses Monitoring
+        -- 1. PROSES MONITORING (Fokus App saat ini)
         if current_monitoring_index <= #packages then
             processAppLogic(current_monitoring_index, #packages)
         end
         
-        -- Background Maintenance (Cek setiap 10 loop)
-        if loop_counter % 10 == 0 then
-            for i = 1, current_monitoring_index - 1 do
-                processAppLogic(i, #packages) -- Masuk step 7
+        -- 2. BACKGROUND CHECK (Cek app lain sekilas)
+        -- Cek 1 app acak selain yang sedang dimonitor agar tidak berat
+        local random_idx = math.random(1, #packages)
+        if random_idx ~= current_monitoring_index then
+             -- Hanya cek if dead (step 7 logic simple)
+             local pkg = packages[random_idx]
+             if pkg.status == "Online" then
+                 local check = exec("pidof " .. pkg.package)
+                 if not check or check == "" then pkg.status = "Retrying"; pkg.state_step = 1 end
+             end
+        end
+        
+        -- 3. CYCLIC LOGIC (15 Detik per App)
+        monitor_timer = monitor_timer + REFRESH_RATE
+        if monitor_timer >= MONITOR_SWITCH_TIME then
+            monitor_timer = 0
+            current_monitoring_index = current_monitoring_index + 1
+            if current_monitoring_index > #packages then
+                current_monitoring_index = 1 -- Loop kembali ke 1
             end
         end
         
-        -- Update RAM (Interval Tertentu)
+        -- 4. UPDATE RAM
         if loop_counter % RAM_UPDATE_INTERVAL == 0 then
             for i, p in ipairs(packages) do
                 if p.state_step >= 5 then p.ram = getRamUsage(p.package) end
             end
         end
         
+        -- 5. DRAW UI
         drawDashboard()
-        exec("sleep " .. REFRESH_RATE)
+        
+        -- 6. DELAY
+        -- Menggunakan busy wait kecil agar responsif
+        local start = os.clock()
+        while os.clock() - start < REFRESH_RATE do end
     end
 end
 
@@ -350,7 +379,8 @@ function savePackages()
 end
 
 function autoDetectRoblox()
-    print("\nScanning...")
+    io.write("\27[2J\27[H")
+    print("Scanning Packages...")
     local res = exec("pm list packages | grep 'roblox'")
     local detected = {}
     for line in res:gmatch("[^\r\n]+") do
@@ -382,8 +412,8 @@ function main()
     loadPackages()
     while true do
         io.write("\27[2J\27[H")
-        print("ZEEN TOOLS v1.0.0")
-        print("1. START MONITORING & LAUNCH")
+        print("ZEEN TOOLS v1.0.1")
+        print("1. START MONITORING (Cyclic Mode)")
         print("2. Detect Packages")
         print("3. Reset Data")
         print("4. Exit")
