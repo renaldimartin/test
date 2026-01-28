@@ -1,14 +1,14 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==================================================
--- PROJECT ZEEN TOOLS v1.0.1 (MINOR UPDATE)
+-- PROJECT ZEEN TOOLS v1.0.1 (HOTFIX)
 -- Auto Grid Freeform - Monitoring Edition
 -- ==================================================
--- Changelog v1.0.1:
--- [+] UI: Solid Table (Box Drawing) - No Broken Lines
--- [+] Optimization: Anti-Flicker Display (Smooth Refresh)
+-- Changelog:
+-- [FIX] Error bad argument #3 on Dashboard
+-- [+] UI: Solid Table (Box Drawing)
+-- [+] Optimization: Anti-Flicker Display
 -- [+] Logic: Cyclic Monitoring (15s per App Loop)
--- [+] Deep Search: Better Username Detection
 -- ==================================================
 
 -- KONFIGURASI
@@ -83,17 +83,13 @@ end
 
 -- [IMPROVED] Deep Search Username
 function getRobloxUsername(pkgName)
-    -- Mencari file XML yang mengandung DisplayName di seluruh folder shared_prefs
-    -- Kita menggunakan grep recursive (-r)
     local cmd = "grep -r \"DisplayName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
     local raw = exec(cmd)
     
-    -- Coba parsing DisplayName
     local user = raw:match("DisplayName\"[^>]*>([^<]+)<") 
     if not user then user = raw:match("value=\"([^\"]+)\"") end
 
     if not user or user == "" then
-        -- Cadangan: Cari UserName
         cmd = "grep -r \"UserName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
         raw = exec(cmd)
         user = raw:match("UserName\"[^>]*>([^<]+)<")
@@ -156,7 +152,6 @@ end
 
 function drawDashboard()
     -- Gunakan buffer string untuk menampung semua text
-    -- \27[H memindahkan kursor ke pojok kiri atas TANPA menghapus layar (Anti-flicker)
     local buffer = "\27[H" 
     
     buffer = buffer .. C_CYAN .. C_BOLD .. "\n"
@@ -174,14 +169,15 @@ function drawDashboard()
         if pkg.status == "Online" or pkg.status == "Ready" then statusColor = C_GREEN
         elseif pkg.status == "Retrying" then statusColor = C_RED end
         
-        -- Indikator Panah di sebelah kiri jika sedang dimonitor
+        -- Indikator Panah
         local indicator = (i == current_monitoring_index) and (C_CYAN .. ">" .. C_RESET) or " "
         
         local displayName = pkg.real_user
         if string.len(displayName) > 14 then displayName = string.sub(displayName, 1, 13) .. "." end
         
-        buffer = buffer .. string.format("│ %s%-2d%s │ %-16s │ %-8s │ %s%-12s%s │\n", 
-            indicator .. i, displayName, pkg.ram, statusColor, pkg.status, C_RESET
+        -- [FIXED LINE] Memisahkan indicator (string) dan i (number)
+        buffer = buffer .. string.format("│ %s%-2d │ %-16s │ %-8s │ %s%-12s%s │\n", 
+            indicator, i, displayName, pkg.ram, statusColor, pkg.status, C_RESET
         )
     end
     
@@ -208,9 +204,6 @@ end
 
 function processAppLogic(index, totalApps)
     local pkg = packages[index]
-    
-    -- STATE MACHINE (Hanya berjalan jika belum Online/Ready)
-    -- Jika sudah Online, fungsi ini hanya memverifikasi (Maintenance)
     
     if pkg.state_step == 0 then
         pkg.status = "Reseting"
@@ -257,7 +250,6 @@ function processAppLogic(index, totalApps)
             local check = exec("pidof " .. pkg.package)
             if check and check ~= "" then
                 pkg.status = "Online"
-                -- Jangan langsung pindah index disini, biarkan logic Cyclic Timer yang mengatur
             else
                 pkg.status = "Retrying"
                 pkg.state_step = 1 
@@ -270,9 +262,6 @@ function processAppLogic(index, totalApps)
         if not check or check == "" then
             pkg.status = "Retrying"
             pkg.state_step = 1 
-            -- Note: Kita tidak memaksa pindah monitoring index ke sini
-            -- agar siklus monitoring tetap terjaga. 
-            -- App ini akan diperbaiki saat gilirannya tiba atau di background check.
         else
             pkg.status = "Online"
         end
@@ -284,7 +273,6 @@ end
 function startMonitoring()
     if #packages == 0 then print("✗ No packages!"); return end
     
-    -- Clear layar sekali di awal
     io.write("\27[2J") 
     
     -- Init Data
@@ -303,16 +291,14 @@ function startMonitoring()
     while true do
         loop_counter = loop_counter + 1
         
-        -- 1. PROSES MONITORING (Fokus App saat ini)
+        -- 1. PROSES MONITORING
         if current_monitoring_index <= #packages then
             processAppLogic(current_monitoring_index, #packages)
         end
         
-        -- 2. BACKGROUND CHECK (Cek app lain sekilas)
-        -- Cek 1 app acak selain yang sedang dimonitor agar tidak berat
+        -- 2. BACKGROUND CHECK
         local random_idx = math.random(1, #packages)
         if random_idx ~= current_monitoring_index then
-             -- Hanya cek if dead (step 7 logic simple)
              local pkg = packages[random_idx]
              if pkg.status == "Online" then
                  local check = exec("pidof " .. pkg.package)
@@ -320,7 +306,7 @@ function startMonitoring()
              end
         end
         
-        -- 3. CYCLIC LOGIC (15 Detik per App)
+        -- 3. CYCLIC LOGIC
         monitor_timer = monitor_timer + REFRESH_RATE
         if monitor_timer >= MONITOR_SWITCH_TIME then
             monitor_timer = 0
@@ -341,7 +327,6 @@ function startMonitoring()
         drawDashboard()
         
         -- 6. DELAY
-        -- Menggunakan busy wait kecil agar responsif
         local start = os.clock()
         while os.clock() - start < REFRESH_RATE do end
     end
