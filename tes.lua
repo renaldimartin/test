@@ -1,18 +1,18 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v4.0
+-- PROJECT ZEEN TOOLS v4.1 (WIDE EDITION)
 -- Auto Grid Freeform - UG Cloner Edition
 -- ==========================================
--- Update v4.0:
--- [+] Auto Detect Screen Resolution
--- [+] 1:1 Aspect Ratio Layout (Right Side)
--- [+] Precision Grid Calculation
+-- Update v4.1:
+-- [+] Logic 1:3 Screen Split (Lebih Lebar)
+--     (25% Kiri Kosong, 75% Kanan Isi App)
+-- [+] Auto Detect Resolution
 -- ==========================================
 
 print("================================")
-print("  PROJECT ZEEN TOOLS v4.0")
-print("  UG Cloner + 1:1 Right Side")
+print("  ZEEN TOOLS v4.1 (WIDE)")
+print("  Mode: 1:3 Split Ratio")
 print("================================")
 print()
 
@@ -60,7 +60,7 @@ function getOrientation()
     end
 end
 
--- [NEW] Auto Detect Real Screen Resolution
+-- Auto Detect Real Screen Resolution
 function updateScreenResolution()
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
@@ -95,13 +95,13 @@ function getLayoutType(numApps)
     if numApps <= 4 then
         return "2x2 Full"
     elseif numApps <= 6 then
-        return "Right Side 1:1 (6 Grid)" -- Mode baru
+        return "Right Side Wide (1:3 Split)" -- Mode Baru 1:3
     else
         return "2x4 Full"
     end
 end
 
--- [UPDATED] Get grid positions with 1:1 Support
+-- Get grid positions
 function getGridPositions(numApps)
     local layoutType = getLayoutType(numApps)
     
@@ -115,18 +115,17 @@ function getGridPositions(numApps)
             {name="Bottom Right", left=w, top=h,   right=DISPLAY_WIDTH, bottom=DISPLAY_HEIGHT},
         }
 
-    elseif layoutType == "Right Side 1:1 (6 Grid)" then
-        -- LOGIKA 1:1 RIGHT SIDE
-        -- Kita membagi tinggi layar menjadi 3 baris
-        -- Lebar window disamakan dengan tinggi window (Square 1:1)
-        -- Posisi ditempel ke kanan (DISPLAY_WIDTH)
+    elseif layoutType == "Right Side Wide (1:3 Split)" then
+        -- LOGIKA 1:3 SPLIT (WIDE MODE)
+        -- Layar dibagi 4 bagian secara vertikal (kolom imajiner)
+        -- 1 Bagian Kiri = Kosong (25%)
+        -- 3 Bagian Kanan = Area App (75%)
         
-        local h_slot = math.floor(DISPLAY_HEIGHT / 3) -- Tinggi per slot
-        local w_slot = h_slot -- Lebar sama dengan tinggi (1:1)
+        local grid_width = math.floor(DISPLAY_WIDTH * 0.75) -- Ambil 75% lebar layar
+        local start_x = DISPLAY_WIDTH - grid_width          -- Mulai dari titik 25%
         
-        -- Titik X mulai (Lebar Layar - (2 x Lebar Slot))
-        -- Ini membuat grid menempel ke kanan
-        local start_x = DISPLAY_WIDTH - (w_slot * 2)
+        local w_slot = math.floor(grid_width / 2)           -- Lebar per window
+        local h_slot = math.floor(DISPLAY_HEIGHT / 3)       -- Tinggi per window (tetap bagi 3)
         
         return {
             -- Baris 1
@@ -169,7 +168,7 @@ function modifyUGClonerPrefs(package, position, numApps)
     -- Detect clone identifier
     local cloneId = package:match("clien([%w]+)$") or "z1"
     
-    -- Find File Logic Enhanced
+    -- Find File Logic
     local findCmd = string.format("ls /data/data/%s/shared_prefs/*.xml 2>/dev/null | grep -i pref", package)
     local foundFiles = exec(findCmd)
     local prefFile = ""
@@ -178,18 +177,16 @@ function modifyUGClonerPrefs(package, position, numApps)
         prefFile = foundFiles:match("([^\n]+_preferences%.xml)")
         if not prefFile then prefFile = foundFiles:match("([^\n]+)") end
     else
-        -- Fallback manual path
         prefFile = string.format("/data/data/%s/shared_prefs/com.roblox.clien%s_preferences.xml", package, cloneId)
-        -- Cek exists
         if not exec("test -f " .. prefFile .. " && echo 'yes'"):match("yes") then
             print("✗ Prefs file not found for " .. package)
             return false
         end
     end
 
-    print("→ Setting " .. pos.name .. ": " .. pos.left .. "," .. pos.top .. " - " .. pos.right .. "," .. pos.bottom)
+    print("→ Posisi " .. pos.name .. ": (" .. pos.left .. "," .. pos.top .. ")")
     
-    -- Perintah SED untuk edit XML
+    -- Edit XML
     local commands = {
         string.format("sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_left\\\" value=\\\"%d\\\"/' '%s'", pos.left, prefFile),
         string.format("sed -i 's/app_cloner_current_window_top\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_top\\\" value=\\\"%d\\\"/' '%s'", pos.top, prefFile),
@@ -197,9 +194,7 @@ function modifyUGClonerPrefs(package, position, numApps)
         string.format("sed -i 's/app_cloner_current_window_bottom\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_bottom\\\" value=\\\"%d\\\"/' '%s'", pos.bottom, prefFile),
     }
     
-    for _, cmd in ipairs(commands) do
-        exec(cmd)
-    end
+    for _, cmd in ipairs(commands) do exec(cmd) end
     
     return true
 end
@@ -257,7 +252,6 @@ function autoDetectRoblox()
     
     if choice == "all" then
         for _, pkg in ipairs(detected) do
-            -- Cek duplikat
             local exists = false
             for _, p in ipairs(packages) do if p.package == pkg then exists = true end end
             
@@ -277,7 +271,7 @@ function launchAutoGrid()
     print("\n══ AUTO GRID LAUNCH ══")
     if #packages == 0 then print("✗ No packages!"); return end
     
-    updateScreenResolution() -- Refresh resolusi sebelum launch
+    updateScreenResolution()
     
     local numApps = #packages
     local layoutType = getLayoutType(numApps)
@@ -286,8 +280,8 @@ function launchAutoGrid()
     print("Screen: " .. DISPLAY_WIDTH .. "x" .. DISPLAY_HEIGHT)
     print("Layout Mode: " .. layoutType)
     
-    if layoutType == "Right Side 1:1 (6 Grid)" then
-        print("ℹ Mode 1:1 aktif. Window akan mengisi sisi KANAN layar.")
+    if layoutType:match("1:3 Split") then
+        print("ℹ Info: Menggunakan 75% lebar layar (Kanan)")
     end
     
     io.write("Lanjutkan? (y/n): ")
@@ -303,9 +297,7 @@ function launchAutoGrid()
         modifyUGClonerPrefs(pkg.package, i, numApps)
         
         exec("am start " .. pkg.package)
-        print("→ Launched.")
         
-        -- Delay lebih lama untuk app pertama biar stabil
         if i == 1 then os.execute("sleep 3") else os.execute("sleep 2") end
     end
     print("\n✓ DONE!")
@@ -313,7 +305,7 @@ end
 
 -- Main Menu
 function showMenu()
-    print("\nZEEN TOOLS v4.0")
+    print("\nZEEN TOOLS v4.1 (WIDE)")
     print("1. Auto Grid Launch (All)")
     print("2. Detect & Add Roblox (Auto)")
     print("3. List Packages")
@@ -326,7 +318,7 @@ end
 function main()
     io.stdout:setvbuf("no")
     loadPackages()
-    updateScreenResolution() -- Init resolusi awal
+    updateScreenResolution()
     
     while true do
         local choice = showMenu()
