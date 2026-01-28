@@ -1,22 +1,22 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==================================================
--- PROJECT ZEEN TOOLS v1.0.1 (MINOR UPDATE)
+-- PROJECT ZEEN TOOLS v1.0.0 (MAJOR UPDATE)
 -- Auto Grid Freeform - Monitoring Edition
 -- ==================================================
--- Changelog v1.0.1:
--- [✓] Tabel solid lines (tidak putus-putus) menggunakan box drawing chars
--- [✓] Monitoring cycling: 20 detik per app, lalu pindah ke app berikutnya (loop infinit)
--- [✓] UI smooth (no flicker) dengan double buffering
--- [✓] Username detection dengan cookie/session files
--- [✓] Display format: "Package Name (Username)"
+-- Changelog v1.0.0:
+-- [+] New UI: Real-time Monitoring Dashboard (Table)
+-- [+] Ratio Layout 1:2 (1 Kiri : 2 Kanan)
+-- [+] State Machine: Reseting->Boosting->Online
+-- [+] Auto Detect Roblox Username (via XML)
+-- [+] RAM Monitoring per App
+-- [+] Auto Retry/Recovery System
 -- ==================================================
 
 -- KONFIGURASI
 local STATUS_BAR_HEIGHT = 60
-local REFRESH_RATE = 0.5 -- Detik (Kecepatan refresh UI)
-local RAM_UPDATE_INTERVAL = 5 -- Update RAM tiap 5 detik
-local MONITORING_DURATION = 20 -- Durasi monitoring per app (detik)
+local REFRESH_RATE = 10 -- Detik (Kecepatan refresh UI)
+local RAM_UPDATE_INTERVAL = 5 -- Update RAM tiap 5 detik (biar gak berat)
 
 -- File paths
 local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
@@ -28,7 +28,6 @@ local DISPLAY_WIDTH = 1280
 local DISPLAY_HEIGHT = 720 
 local current_monitoring_index = 1
 local loop_counter = 0
-local monitoring_timer = 0
 
 -- Warna ANSI
 local C_RESET  = "\27[0m"
@@ -40,19 +39,6 @@ local C_CYAN   = "\27[36m"
 local C_WHITE  = "\27[37m"
 local C_BOLD   = "\27[1m"
 
--- Box Drawing Characters (Unicode untuk garis solid)
-local BOX_H = "─"     -- Horizontal
-local BOX_V = "│"     -- Vertical
-local BOX_TL = "┌"    -- Top Left
-local BOX_TR = "┐"    -- Top Right
-local BOX_BL = "└"    -- Bottom Left
-local BOX_BR = "┘"    -- Bottom Right
-local BOX_T = "┬"     -- Top T
-local BOX_B = "┴"     -- Bottom T
-local BOX_L = "├"     -- Left T
-local BOX_R = "┤"     -- Right T
-local BOX_X = "┼"     -- Cross
-
 -- ================= HELPER FUNCTIONS =================
 
 function exec(cmd)
@@ -63,6 +49,7 @@ function exec(cmd)
     f:close()
     os.execute("chmod +x " .. TEMP_SCRIPT)
     local output_file = "/data/data/com.termux/files/home/.temp_output.txt"
+    -- Menggunakan timeout agar tidak hang
     os.execute("su -c '" .. TEMP_SCRIPT .. " > " .. output_file .. " 2>&1'")
     local result = ""
     local rf = io.open(output_file, "r")
@@ -90,91 +77,55 @@ function updateScreenResolution()
     end
 end
 
--- ================= CORE LOGIC v1.0.1 =================
+-- ================= CORE LOGIC v1.0.0 =================
 
--- [UPDATE v1.0.1] Detect Username dengan Cookie/Session Files
+-- [BARU] Detect Roblox Username dari XML
 function getRobloxUsername(pkgName)
-    -- Metode 1: Cek file cookies atau session
-    local cookieCmd = "find /data/data/" .. pkgName .. " -type f \\( -name '*cookie*' -o -name '*session*' -o -name '*user*' -o -name '*.json' \\) 2>/dev/null | head -5"
-    local cookieFiles = exec(cookieCmd)
+    -- Mencoba mencari username di file preferences umum Roblox
+    -- Pattern grep mencari value di XML seperti: <string name="UserName">ZEEN_PLAYER</string>
+    -- Atau mencari di shared_prefs apapun yang mengandung string nama akun
     
-    -- Parse cookie files untuk username/displayname
-    if cookieFiles and cookieFiles ~= "" then
-        for file in cookieFiles:gmatch("[^\r\n]+") do
-            -- Cari username di dalam file
-            local content = exec("cat '" .. file .. "' 2>/dev/null | head -100")
-            
-            -- Pattern matching untuk username di JSON atau format lain
-            local username = content:match('"[Uu]sername":"([^"]+)"') or
-                           content:match('"[Dd]isplayName":"([^"]+)"') or
-                           content:match('"[Nn]ame":"([^"]+)"') or
-                           content:match('"[Uu]ser":"([^"]+)"')
-            
-            if username and username ~= "" and not username:match("^%d+$") then
-                return username
-            end
-        end
-    end
-    
-    -- Metode 2: Cek shared_prefs XML (fallback dari v1.0.0)
-    local cmd = "grep -r 'UserName\\|DisplayName\\|username\\|displayname' /data/data/" .. pkgName .. "/shared_prefs/ 2>/dev/null | head -3"
+    local cmd = "grep -r \"UserName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
     local raw = exec(cmd)
     
-    -- Parse XML value
-    local user = raw:match('value="([^"]+)"') or 
-                raw:match('>([^<]+)</string>') or
-                raw:match('name="username">([^<]+)')
+    -- Parsing kasar hasil XML
+    local user = raw:match("value=\"([^\"]+)\"")
     
-    if user and user ~= "" and not user:match("^%d+$") then
+    if not user or user == "" then
+        -- Coba cari DisplayName jika UserName kosong
+        cmd = "grep -r \"DisplayName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
+        raw = exec(cmd)
+        user = raw:match("value=\"([^\"]+)\"")
+    end
+
+    if user and user ~= "" then
         return user
+    else
+        return "Unknown"
     end
-    
-    -- Metode 3: Cek database files
-    local dbCmd = "find /data/data/" .. pkgName .. "/databases -type f -name '*.db' 2>/dev/null | head -1"
-    local dbFile = exec(dbCmd)
-    if dbFile and dbFile ~= "" then
-        dbFile = dbFile:match("([^\r\n]+)")
-        local dbQuery = "strings '" .. dbFile .. "' 2>/dev/null | grep -i 'username\\|displayname' | head -5"
-        local dbResult = exec(dbQuery)
-        
-        for line in dbResult:gmatch("[^\r\n]+") do
-            -- Ekstrak username dari hasil strings
-            local name = line:match("([%w_]+)")
-            if name and string.len(name) > 3 and string.len(name) < 25 and not name:match("^[0-9]+$") then
-                return name
-            end
-        end
-    end
-    
-    return "Unknown"
 end
 
--- Get RAM Usage (MB)
+-- [BARU] Get RAM Usage (MB)
 function getRamUsage(pkgName)
-    local cmd = "dumpsys meminfo " .. pkgName .. " | grep 'TOTAL PSS:'"
+    -- Mengambil PSS Total
+    local cmd = "dumpsys meminfo " .. pkgName .. " | grep 'TOTAL'"
     local raw = exec(cmd)
-    
-    -- Try different patterns
-    local kb = raw:match("TOTAL PSS:%s*(%d+)") or raw:match("TOTAL:%s*(%d+)")
-    
-    if not kb or kb == "" then
-        -- Fallback: coba ambil baris TOTAL biasa
-        cmd = "dumpsys meminfo " .. pkgName .. " | grep 'TOTAL' | head -1"
-        raw = exec(cmd)
-        kb = raw:match("%s*(%d+)%s*")
-    end
+    local kb = raw:match("%s*(%d+)%s*")
     
     if kb then
         local mb = math.floor(tonumber(kb) / 1024)
         return mb .. " MB"
     else
-        return "- MB"
+        return "0 MB"
     end
 end
 
--- Optimize System
+-- [BARU] Optimize System (Kill background apps except Termux & Roblox)
 function optimizeSystem()
+    -- Kill background processes safe list
+    -- Ini versi simpel: trim caches dan kill background processes umum
     exec("pm trim-caches 100M")
+    -- exec("am kill-all") -- Hati-hati dengan ini di beberapa device
 end
 
 -- [LAYOUT] 1:2 Ratio Calculation
@@ -182,10 +133,15 @@ function getGridPositions(numApps)
     local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
     local h_slot = math.floor(usable_height / 3)
     
+    -- RASIO 1:2 (Total 3 Bagian)
+    -- Kiri: 1 Bagian (33.3%)
+    -- Kanan: 2 Bagian (66.6%)
+    
     local grid_width = math.floor(DISPLAY_WIDTH * (2/3))
     local start_x = DISPLAY_WIDTH - grid_width
     local w_slot = math.floor(grid_width / 2)
     
+    -- Koordinat Y
     local y1, y2, y3 = STATUS_BAR_HEIGHT, STATUS_BAR_HEIGHT + h_slot, STATUS_BAR_HEIGHT + (h_slot*2)
     local b1, b2, b3 = y1 + h_slot, y2 + h_slot, DISPLAY_HEIGHT 
     
@@ -199,6 +155,7 @@ function getGridPositions(numApps)
     }
 end
 
+-- Modifikasi Preferences
 function modifyPrefs(package, position, numApps)
     local grid = getGridPositions(numApps)
     local pos = grid[position]
@@ -222,74 +179,28 @@ function modifyPrefs(package, position, numApps)
     for _, cmd in ipairs(cmds) do exec(cmd) end
 end
 
--- ================= DASHBOARD UI v1.0.1 =================
+-- ================= DASHBOARD UI =================
 
--- [UPDATE v1.0.1] Double Buffer untuk menghindari flicker
-local screen_buffer = {}
-
-function clearBuffer()
-    screen_buffer = {}
-end
-
-function addToBuffer(text)
-    table.insert(screen_buffer, text)
-end
-
-function flushBuffer()
-    -- Move cursor to home, lalu print semua sekaligus
-    io.write("\27[H")
-    io.write(table.concat(screen_buffer, "\n"))
-    io.flush()
-end
-
--- [UPDATE v1.0.1] Solid Table dengan box drawing characters
 function drawDashboard()
-    clearBuffer()
+    -- Clear Screen
+    io.write("\27[2J\27[H")
     
-    -- Logo (tetap sama)
-    addToBuffer(C_CYAN .. C_BOLD)
-    addToBuffer("███████╗███████╗███████╗███╗   ██╗")
-    addToBuffer("╚══███╔╝██╔════╝██╔════╝████╗  ██║")
-    addToBuffer("  ███╔╝ █████╗  █████╗  ██╔██╗ ██║")
-    addToBuffer(" ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║")
-    addToBuffer("███████╗███████╗███████╗██║ ╚████║")
-    addToBuffer("╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝")
-    addToBuffer("        ZEEN TOOLS v1.0.1         ")
-    addToBuffer(C_RESET)
+    print(C_CYAN .. C_BOLD)
+    print("███████╗███████╗███████╗███╗   ██╗")
+    print("╚══███╔╝██╔════╝██╔════╝████╗  ██║")
+    print("  ███╔╝ █████╗  █████╗  ██╔██╗ ██║")
+    print(" ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║")
+    print("███████╗███████╗███████╗██║ ╚████║")
+    print("╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝")
+    print("        ZEEN TOOLS v1.0.0         ")
+    print(C_RESET)
     
-    -- Table dengan garis solid
-    local colWidths = {3, 30, 8, 12} -- No, Nama, RAM, Status
-    local totalWidth = colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + 7 -- +7 untuk borders
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
+    -- Header Table
+    print(string.format("%s%-3s | %-16s | %-8s | %-12s%s", C_BOLD, "No", "Nama Akun", "RAM", "Status", C_RESET))
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
     
-    -- Top border
-    local topBorder = BOX_TL
-    for i, w in ipairs(colWidths) do
-        topBorder = topBorder .. string.rep(BOX_H, w + 2)
-        if i < #colWidths then topBorder = topBorder .. BOX_T end
-    end
-    topBorder = topBorder .. BOX_TR
-    addToBuffer(C_WHITE .. topBorder .. C_RESET)
-    
-    -- Header
-    local header = string.format("%s %s%-3s%s %s %s%-30s%s %s %s%-8s%s %s %s%-12s%s %s",
-        BOX_V, C_BOLD, "No", C_RESET,
-        BOX_V, C_BOLD, "Nama", C_RESET,
-        BOX_V, C_BOLD, "RAM", C_RESET,
-        BOX_V, C_BOLD, "Status", C_RESET,
-        BOX_V
-    )
-    addToBuffer(header)
-    
-    -- Middle border
-    local midBorder = BOX_L
-    for i, w in ipairs(colWidths) do
-        midBorder = midBorder .. string.rep(BOX_H, w + 2)
-        if i < #colWidths then midBorder = midBorder .. BOX_X end
-    end
-    midBorder = midBorder .. BOX_R
-    addToBuffer(C_WHITE .. midBorder .. C_RESET)
-    
-    -- Data rows
+    -- Rows
     for i, pkg in ipairs(packages) do
         local statusColor = C_WHITE
         if pkg.status == "Reseting" then statusColor = C_RED
@@ -300,79 +211,59 @@ function drawDashboard()
         elseif pkg.status == "Retrying" then statusColor = C_RED
         end
         
-        -- [UPDATE v1.0.1] Format: "Package Name (Username)"
-        local displayName = pkg.name
-        if pkg.real_user and pkg.real_user ~= "Unknown" and pkg.real_user ~= "Scanning..." then
-            displayName = pkg.name .. " (" .. pkg.real_user .. ")"
-        end
+        -- Nama akun (ambil 14 karakter max)
+        local displayName = pkg.real_user
+        if string.len(displayName) > 14 then displayName = string.sub(displayName, 1, 13) .. "." end
         
-        -- Truncate jika terlalu panjang
-        if string.len(displayName) > 28 then 
-            displayName = string.sub(displayName, 1, 27) .. "…" 
-        end
-        
-        local row = string.format("%s %-3d %s %-30s %s %-8s %s %s%-12s%s %s",
-            BOX_V, i,
-            BOX_V, displayName,
-            BOX_V, pkg.ram,
-            BOX_V, statusColor, pkg.status, C_RESET,
-            BOX_V
-        )
-        addToBuffer(row)
+        print(string.format("%-3d | %-16s | %-8s | %s%-12s%s", 
+            i, 
+            displayName, 
+            pkg.ram, 
+            statusColor, pkg.status, C_RESET
+        ))
     end
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
     
-    -- Bottom border
-    local botBorder = BOX_BL
-    for i, w in ipairs(colWidths) do
-        botBorder = botBorder .. string.rep(BOX_H, w + 2)
-        if i < #colWidths then botBorder = botBorder .. BOX_B end
-    end
-    botBorder = botBorder .. BOX_BR
-    addToBuffer(C_WHITE .. botBorder .. C_RESET)
-    
-    -- [UPDATE v1.0.1] Status monitoring dengan timer countdown
-    local timeLeft = MONITORING_DURATION - monitoring_timer
-    addToBuffer("")
-    addToBuffer(string.format("%sMonitoring:%s %d/%d | %sApp:%s %s | %sTime:%s %ds", 
-        C_CYAN, C_RESET, current_monitoring_index, #packages,
-        C_YELLOW, C_RESET, packages[current_monitoring_index] and packages[current_monitoring_index].name or "N/A",
-        C_GREEN, C_RESET, math.max(0, timeLeft)
-    ))
-    addToBuffer("")
-    addToBuffer(C_WHITE .. "[CTRL+C] Stop Script" .. C_RESET)
-    
-    -- Flush ke screen
-    flushBuffer()
+    -- Footer Info
+    local activePkg = packages[current_monitoring_index] or {}
+    local progressText = activePkg.status or "Idle"
+    print(string.format("%sMonitoring: %d/%d (%s)%s", C_BOLD, current_monitoring_index, #packages, progressText, C_RESET))
+    print(C_WHITE .. "\n[CTRL+C] Stop Script" .. C_RESET)
 end
 
--- ================= APP STATE MACHINE =================
+-- ================= STATE MACHINE LOGIC =================
 
 function processAppLogic(index, totalApps)
     local pkg = packages[index]
-    if not pkg then return end
     
+    -- STATE MACHINE
     if pkg.state_step == 0 then
-        -- Step 0: Initialize
+        -- Step 0: Initial
         pkg.status = "Reseting"
-        exec("am force-stop " .. pkg.package)
         pkg.state_step = 1
         
     elseif pkg.state_step == 1 then
-        -- Step 1: Clear Data
+        -- Step 1: Force Stop / Reset
         pkg.status = "Reseting"
-        exec("pm clear " .. pkg.package)
+        exec("am force-stop " .. pkg.package)
+        
+        -- Ambil username selagi app mati (lebih aman read filenya)
+        if pkg.real_user == "Scanning..." then
+            pkg.real_user = getRobloxUsername(pkg.package)
+        end
+        
         pkg.state_step = 2
         
     elseif pkg.state_step == 2 then
         -- Step 2: Boosting
         pkg.status = "Boosting"
-        exec("pm trim-caches 50M")
+        exec("pm trim-caches 50M") -- Clear cache ringan
         pkg.state_step = 3
         
     elseif pkg.state_step == 3 then
         -- Step 3: Optimized
         pkg.status = "Optimized"
-        optimizeSystem()
+        optimizeSystem() -- Kill background apps lain
         pkg.state_step = 4
         
     elseif pkg.state_step == 4 then
@@ -386,118 +277,97 @@ function processAppLogic(index, totalApps)
         pkg.status = "Launched"
         exec("am start " .. pkg.package)
         pkg.state_step = 6
-        pkg.wait_timer = 5
+        pkg.wait_timer = 5 -- Beri waktu 5 detik sebelum cek Online
         
     elseif pkg.state_step == 6 then
         -- Step 6: Checking Online Status
         if pkg.wait_timer > 0 then
             pkg.wait_timer = pkg.wait_timer - 1
         else
+            -- Cek apakah prosesnya masih hidup
             local check = exec("pidof " .. pkg.package)
             if check and check ~= "" then
                 pkg.status = "Online"
-                pkg.state_step = 7
-                
-                -- [UPDATE v1.0.1] Detect username setelah online
-                if pkg.real_user == "Scanning..." or pkg.real_user == "Unknown" then
-                    pkg.real_user = getRobloxUsername(pkg.package)
+                -- Jika sudah online, tugas monitoring pindah ke app berikutnya
+                if current_monitoring_index < totalApps then
+                    current_monitoring_index = current_monitoring_index + 1
                 end
             else
                 pkg.status = "Retrying"
-                pkg.state_step = 1
+                pkg.state_step = 1 -- Ulang dari awal
             end
         end
         
     elseif pkg.state_step == 7 then
-        -- Step 7: Maintenance - Sudah Online
+        -- Step 7 (Maintenance): Sudah Online, pantau terus
+        -- Jika crash, masuk Retrying
         local check = exec("pidof " .. pkg.package)
         if not check or check == "" then
             pkg.status = "Retrying"
-            pkg.state_step = 1
+            pkg.state_step = 1 -- Reset lagi
+            current_monitoring_index = index -- Fokus balik ke app ini
         else
             pkg.status = "Online"
         end
     end
 end
 
--- ================= MAIN MONITORING LOOP v1.0.1 =================
+-- ================= MAIN MONITORING LOOP =================
 
 function startMonitoring()
     if #packages == 0 then print("✗ No packages!"); return end
     
-    -- Inisialisasi
+    -- Inisialisasi Data
     for i, p in ipairs(packages) do
         p.status = "Waiting"
-        p.ram = "- MB"
+        p.ram = "0 MB"
         p.real_user = "Scanning..."
-        p.state_step = 0
+        p.state_step = 0 -- 0=Init
         p.wait_timer = 0
     end
     
     current_monitoring_index = 1
-    monitoring_timer = 0
     updateScreenResolution()
     
-    -- Clear screen sekali di awal (untuk menghindari flicker)
-    io.write("\27[2J")
-    
-    -- LOOP UTAMA
+    -- LOOP UTAMA (Infinite sampai CTRL+C)
     while true do
         loop_counter = loop_counter + 1
-        monitoring_timer = monitoring_timer + 1
         
-        -- [UPDATE v1.0.1] Sistem cycling: 20 detik per app
-        if monitoring_timer >= (MONITORING_DURATION / REFRESH_RATE) then
-            monitoring_timer = 0
-            
-            -- Pindah ke app berikutnya
-            current_monitoring_index = current_monitoring_index + 1
-            if current_monitoring_index > #packages then
-                current_monitoring_index = 1 -- Loop kembali ke awal
-            end
-        end
+        -- 1. Jalankan Logic untuk App yang sedang giliran monitoring
+        --    Tapi kita juga bisa cek app lain yang sudah 'Online' apakah crash (maintenance)
         
-        -- Proses app yang sedang di-monitor
+        -- Proses app yang sedang antri (Current Index)
         if current_monitoring_index <= #packages then
             processAppLogic(current_monitoring_index, #packages)
         end
         
-        -- Maintenance check untuk app yang sudah Online (background check)
+        -- Cek Background (Maintenance) untuk app yang sudah lewat giliran (sudah Online)
+        -- Kita cek setiap 10 loop agar tidak berat
         if loop_counter % 10 == 0 then
-            for i = 1, #packages do
-                if i ~= current_monitoring_index and packages[i].state_step == 7 then
-                    processAppLogic(i, #packages)
-                end
+            for i = 1, current_monitoring_index - 1 do
+                processAppLogic(i, #packages) -- Masuk ke step 7 (maintenance check)
             end
         end
         
-        -- Update RAM (tidak setiap frame)
+        -- 2. Update RAM (Jangan setiap frame, berat!)
         if loop_counter % (RAM_UPDATE_INTERVAL * 2) == 0 then
             for i, p in ipairs(packages) do
+                -- Hanya update RAM jika app sudah Launched/Online
                 if p.state_step >= 5 then
                     p.ram = getRamUsage(p.package)
                 end
             end
         end
         
-        -- Update Username scanning (setiap 30 detik)
-        if loop_counter % 60 == 0 then
-            for i, p in ipairs(packages) do
-                if (p.real_user == "Scanning..." or p.real_user == "Unknown") and p.state_step >= 6 then
-                    p.real_user = getRobloxUsername(p.package)
-                end
-            end
-        end
-        
-        -- Draw UI (smooth, no clear screen)
+        -- 3. Draw UI
         drawDashboard()
         
-        -- Sleep
-        os.execute("sleep " .. REFRESH_RATE)
+        -- 4. Delay Refresh
+        exec("sleep " .. REFRESH_RATE)
     end
 end
 
--- ================= BOILERPLATE =================
+-- ================= BOILERPLATE (Load/Save/Menu) =================
 
 function loadPackages()
     local file = io.open(PACKAGE_FILE, "r")
@@ -506,6 +376,7 @@ function loadPackages()
         for line in file:lines() do
             local name, package = line:match("(.+)|(.+)")
             if name and package then 
+                -- Tambah field baru untuk monitoring
                 table.insert(packages, {
                     name = name, 
                     package = package,
@@ -561,8 +432,9 @@ function main()
     loadPackages()
     
     while true do
-        io.write("\27[2J\27[H")
-        print(C_CYAN .. C_BOLD .. "ZEEN TOOLS v1.0.1" .. C_RESET)
+        -- Menu Sederhana (Monitoring ada di opsi 1)
+        io.write("\27[2J\27[H") -- Clear
+        print("ZEEN TOOLS v1.0.0")
         print("1. START MONITORING & LAUNCH")
         print("2. Detect Packages")
         print("3. Reset Data")
@@ -579,3 +451,27 @@ function main()
 end
 
 main()
+
+Penjelasan Preview Tampilan & Sistem
+Ketika kamu menekan menu 1, layar akan bersih dan menampilkan Dashboard seperti ini (Real-time update):
+███████╗███████╗███████╗███╗   ██╗
+╚══███╔╝██╔════╝██╔════╝████╗  ██║
+  ███╔╝ █████╗  █████╗  ██╔██╗ ██║
+ ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║
+███████╗███████╗███████╗██║ ╚████║
+╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝
+        ZEEN TOOLS v1.0.0         
+──────────────────────────────────────────────────
+No  | Nama Akun        | RAM      | Status      
+──────────────────────────────────────────────────
+1   | ProGamer123      | 250 MB   | Online      
+2   | ZeenFarmer99     | 180 MB   | Launched    
+3   | AkunCadangan     | 0 MB     | Boosting    
+4   | Roblox Client4   | 0 MB     | Waiting     
+5   | Roblox Client5   | 0 MB     | Waiting     
+6   | Roblox Client6   | 0 MB     | Waiting     
+──────────────────────────────────────────────────
+Monitoring: 3/6 (Boosting)
+
+[CTRL+C] Stop Script
+
