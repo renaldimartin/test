@@ -1,242 +1,324 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
--- ==========================================
--- PROJECT ZEEN TOOLS v4.3 (PRO EDITION)
--- Auto Grid Freeform - UG Cloner Edition
--- ==========================================
--- Update v4.3:
--- [+] RATIO 1:2.5 Split (Lebih presisi)
--- [+] SETTINGS MENU: Atur Delay Launch
--- [+] Save/Load Config otomatis
--- [+] Fix Status Bar Safety Tetap Ada
--- ==========================================
+-- ==================================================
+-- PROJECT ZEEN TOOLS v1.0.0 (MAJOR UPDATE)
+-- Auto Grid Freeform - Monitoring Edition
+-- ==================================================
+-- Changelog v1.0.0:
+-- [+] UI: Real-time Monitoring Table
+-- [+] Ratio Layout: 1:2 (1 Kiri : 2 Kanan)
+-- [+] State Machine: Auto Launch & Recovery
+-- [+] Color Coding: Green (Online/Ready), Red (Retry)
+-- [+] Auto Detect Roblox Username
+-- ==================================================
 
-print("================================")
-print("  ZEEN TOOLS v4.3 (PRO)")
-print("  Ratio: 1:2.5 | Custom Delay")
-print("================================")
-print()
-
--- KONFIGURASI DEFAULT
-local STATUS_BAR_HEIGHT = 60 -- Safety margin pixel atas
-local DEFAULT_DELAY = 10     -- Default delay 10 detik
+-- KONFIGURASI
+local STATUS_BAR_HEIGHT = 60 -- Safety margin (pixel)
+local REFRESH_RATE = 0.5     -- Kecepatan refresh UI (detik)
+local RAM_UPDATE_INTERVAL = 10 -- Update RAM tiap 10 loop (biar ringan)
 
 -- File paths
 local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
-local CONFIG_FILE = "/data/data/com.termux/files/home/.zeen_config.txt"
 local TEMP_SCRIPT = "/data/data/com.termux/files/home/.temp_cmd.sh"
 
 -- Data storage
-local packages = {}
-local active_tasks = {}
-local config = {
-    delay = DEFAULT_DELAY
-}
+local packages = {} 
 local DISPLAY_WIDTH = 1280 
 local DISPLAY_HEIGHT = 720 
+local current_monitoring_index = 1
+local loop_counter = 0
 
--- Execute root command
+-- Warna ANSI (Terminal Colors)
+local C_RESET  = "\27[0m"
+local C_RED    = "\27[31m"
+local C_GREEN  = "\27[32m"
+local C_YELLOW = "\27[33m"
+local C_BLUE   = "\27[34m"
+local C_CYAN   = "\27[36m"
+local C_WHITE  = "\27[37m"
+local C_BOLD   = "\27[1m"
+
+-- ================= HELPER FUNCTIONS =================
+
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
     if not f then return "" end
     f:write("#!/system/bin/sh\n")
     f:write(cmd .. "\n")
     f:close()
-    
     os.execute("chmod +x " .. TEMP_SCRIPT)
     local output_file = "/data/data/com.termux/files/home/.temp_output.txt"
     os.execute("su -c '" .. TEMP_SCRIPT .. " > " .. output_file .. " 2>&1'")
-    
     local result = ""
     local rf = io.open(output_file, "r")
-    if rf then
-        result = rf:read("*a")
-        rf:close()
-    end
-    
+    if rf then result = rf:read("*a"); rf:close() end
     os.remove(TEMP_SCRIPT)
     os.remove(output_file)
     return result
 end
 
--- Load & Save Config (Delay)
-function loadConfig()
-    local f = io.open(CONFIG_FILE, "r")
-    if f then
-        for line in f:lines() do
-            local key, val = line:match("(%w+)=(%d+)")
-            if key and val then
-                config[key] = tonumber(val)
-            end
-        end
-        f:close()
-    end
-end
-
-function saveConfig()
-    local f = io.open(CONFIG_FILE, "w")
-    if f then
-        f:write("delay=" .. config.delay .. "\n")
-        f:close()
-        return true
-    end
-    return false
-end
-
--- Detect orientation
 function getOrientation()
     local result = exec("dumpsys window | grep 'mCurrentRotation'")
-    if result:match("ROTATION_90") or result:match("ROTATION_270") then
-        return "landscape"
-    else
-        return "portrait"
-    end
+    if result:match("ROTATION_90") or result:match("ROTATION_270") then return "landscape" else return "portrait" end
 end
 
--- Auto Detect Resolution
 function updateScreenResolution()
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
-    
     if w and h then
-        w = tonumber(w)
-        h = tonumber(h)
-        local ori = getOrientation()
-        
-        if ori == "landscape" then
-            if w < h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w
-            else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
+        w, h = tonumber(w), tonumber(h)
+        if getOrientation() == "landscape" then
+            if w < h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
         else
-            if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w
-            else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
+            if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
         end
-        print("✓ Screen: " .. DISPLAY_WIDTH .. "x" .. DISPLAY_HEIGHT .. " (Safe Top: " .. STATUS_BAR_HEIGHT .. "px)")
-    else
-        print("⚠ Gagal deteksi layar, default: 1280x720")
     end
 end
 
--- Determine layout type
-function getLayoutType(numApps)
-    if numApps <= 4 then return "2x2 Full"
-    elseif numApps <= 6 then return "Right Side 1:2.5"
-    else return "2x4 Full" end
+-- ================= CORE LOGIC v1.0.0 =================
+
+-- Get Roblox Username (From XML/Cache)
+function getRobloxUsername(pkgName)
+    local cmd = "grep -r \"UserName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
+    local raw = exec(cmd)
+    local user = raw:match("value=\"([^\"]+)\"")
+    
+    if not user or user == "" then
+        cmd = "grep -r \"DisplayName\" /data/data/" .. pkgName .. "/shared_prefs/ | head -n 1"
+        raw = exec(cmd)
+        user = raw:match("value=\"([^\"]+)\"")
+    end
+    return (user and user ~= "") and user or "Unknown"
 end
 
--- Get grid positions (UPDATED RATIO 1:2.5)
+-- Get RAM Usage
+function getRamUsage(pkgName)
+    local raw = exec("dumpsys meminfo " .. pkgName .. " | grep 'TOTAL'")
+    local kb = raw:match("%s*(%d+)%s*")
+    return kb and (math.floor(tonumber(kb) / 1024) .. " MB") or "0 MB"
+end
+
+-- Optimize System (Kill bg apps)
+function optimizeSystem()
+    exec("pm trim-caches 100M")
+end
+
+-- LAYOUT 1:2 CALCULATION
 function getGridPositions(numApps)
-    local layoutType = getLayoutType(numApps)
+    local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
+    local h_slot = math.floor(usable_height / 3)
     
-    if layoutType == "2x2 Full" then
-        local w = math.floor(DISPLAY_WIDTH / 2)
-        local h = math.floor(DISPLAY_HEIGHT / 2)
-        return {
-            {name="TL", left=0, top=0, right=w, bottom=h},
-            {name="TR", left=w, top=0, right=DISPLAY_WIDTH, bottom=h},
-            {name="BL", left=0, top=h, right=w, bottom=DISPLAY_HEIGHT},
-            {name="BR", left=w, top=h, right=DISPLAY_WIDTH, bottom=DISPLAY_HEIGHT},
-        }
-
-    elseif layoutType == "Right Side 1:2.5" then
-        -- ==================================================
-        -- LOGIKA 1:2.5 SPLIT
-        -- Total Bagian = 1 (Kiri) + 2.5 (Kanan) = 3.5
-        -- Persentase Kanan = 2.5 / 3.5 ≈ 71.4%
-        -- ==================================================
-        
-        local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
-        local h_slot = math.floor(usable_height / 3)
-        
-        -- Hitung Lebar berdasarkan rasio 1:2.5
-        local ratio_mult = 2.5 / 3.5
-        local grid_width = math.floor(DISPLAY_WIDTH * ratio_mult)
-        
-        local start_x = DISPLAY_WIDTH - grid_width
-        local w_slot = math.floor(grid_width / 2)
-        
-        -- Koordinat Y
-        local y1 = STATUS_BAR_HEIGHT
-        local y2 = STATUS_BAR_HEIGHT + h_slot
-        local y3 = STATUS_BAR_HEIGHT + (h_slot*2)
-        
-        local b1 = y1 + h_slot
-        local b2 = y2 + h_slot
-        local b3 = DISPLAY_HEIGHT 
-        
-        return {
-            -- Baris 1
-            {name="R1 Left",  left=start_x,        top=y1, right=start_x+w_slot, bottom=b1},
-            {name="R1 Right", left=start_x+w_slot, top=y1, right=DISPLAY_WIDTH,    bottom=b1},
-            -- Baris 2
-            {name="R2 Left",  left=start_x,        top=y2, right=start_x+w_slot, bottom=b2},
-            {name="R2 Right", left=start_x+w_slot, top=y2, right=DISPLAY_WIDTH,    bottom=b2},
-            -- Baris 3
-            {name="R3 Left",  left=start_x,        top=y3, right=start_x+w_slot, bottom=b3},
-            {name="R3 Right", left=start_x+w_slot, top=y3, right=DISPLAY_WIDTH,    bottom=b3},
-        }
-
-    else -- 2x4 Fallback
-        local h = math.floor(DISPLAY_HEIGHT / 4)
-        local w = h * 2
-        return {
-            {name="R1 L", left=0, top=0,     right=w,             bottom=h},
-            {name="R1 R", left=w, top=0,     right=DISPLAY_WIDTH, bottom=h},
-            {name="R2 L", left=0, top=h,     right=w,             bottom=h*2},
-            {name="R2 R", left=w, top=h,     right=DISPLAY_WIDTH, bottom=h*2},
-            {name="R3 L", left=0, top=h*2,   right=w,             bottom=h*3},
-            {name="R3 R", left=w, top=h*2,   right=DISPLAY_WIDTH, bottom=h*3},
-            {name="R4 L", left=0, top=h*3,   right=w,             bottom=DISPLAY_HEIGHT},
-            {name="R4 R", left=w, top=h*3,   right=DISPLAY_WIDTH, bottom=DISPLAY_HEIGHT},
-        }
-    end
+    -- RASIO 1:2 (Total 3 Bagian)
+    -- Kiri: 1 Bagian (33.3%) | Kanan: 2 Bagian (66.6%)
+    local grid_width = math.floor(DISPLAY_WIDTH * (2/3))
+    local start_x = DISPLAY_WIDTH - grid_width
+    local w_slot = math.floor(grid_width / 2)
+    
+    local y1, y2, y3 = STATUS_BAR_HEIGHT, STATUS_BAR_HEIGHT + h_slot, STATUS_BAR_HEIGHT + (h_slot*2)
+    local b1, b2, b3 = y1 + h_slot, y2 + h_slot, DISPLAY_HEIGHT 
+    
+    return {
+        {name="R1 L", left=start_x, top=y1, right=start_x+w_slot, bottom=b1},
+        {name="R1 R", left=start_x+w_slot, top=y1, right=DISPLAY_WIDTH, bottom=b1},
+        {name="R2 L", left=start_x, top=y2, right=start_x+w_slot, bottom=b2},
+        {name="R2 R", left=start_x+w_slot, top=y2, right=DISPLAY_WIDTH, bottom=b2},
+        {name="R3 L", left=start_x, top=y3, right=start_x+w_slot, bottom=b3},
+        {name="R3 R", left=start_x+w_slot, top=y3, right=DISPLAY_WIDTH, bottom=b3},
+    }
 end
 
--- Modify XML
-function modifyUGClonerPrefs(package, position, numApps)
-    local grid_positions = getGridPositions(numApps)
-    local pos = grid_positions[position]
-    
-    if not pos then return false end
+-- Modify Preferences
+function modifyPrefs(package, position, numApps)
+    local grid = getGridPositions(numApps)
+    local pos = grid[position]
+    if not pos then return end
     
     local cloneId = package:match("clien([%w]+)$") or "z1"
-    
-    local findCmd = string.format("ls /data/data/%s/shared_prefs/*.xml 2>/dev/null | grep -i pref", package)
+    local findCmd = "ls /data/data/" .. package .. "/shared_prefs/*.xml 2>/dev/null | grep -i pref"
     local foundFiles = exec(findCmd)
-    local prefFile = ""
+    local prefFile = foundFiles:match("([^\n]+_preferences%.xml)") or foundFiles:match("([^\n]+)")
     
-    if foundFiles and foundFiles ~= "" then
-        prefFile = foundFiles:match("([^\n]+_preferences%.xml)") or foundFiles:match("([^\n]+)")
-    else
-        prefFile = string.format("/data/data/%s/shared_prefs/com.roblox.clien%s_preferences.xml", package, cloneId)
-        if not exec("test -f " .. prefFile .. " && echo 'yes'"):match("yes") then
-            print("✗ Prefs file not found: " .. package)
-            return false
-        end
+    if not prefFile then 
+        prefFile = "/data/data/"..package.."/shared_prefs/com.roblox.clien"..cloneId.."_preferences.xml"
     end
-
-    print("→ Set " .. pos.name .. ": (" .. pos.left .. "," .. pos.top .. ")")
     
-    local commands = {
+    local cmds = {
         string.format("sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_left\\\" value=\\\"%d\\\"/' '%s'", pos.left, prefFile),
         string.format("sed -i 's/app_cloner_current_window_top\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_top\\\" value=\\\"%d\\\"/' '%s'", pos.top, prefFile),
         string.format("sed -i 's/app_cloner_current_window_right\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_right\\\" value=\\\"%d\\\"/' '%s'", pos.right, prefFile),
         string.format("sed -i 's/app_cloner_current_window_bottom\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_bottom\\\" value=\\\"%d\\\"/' '%s'", pos.bottom, prefFile),
     }
-    
-    for _, cmd in ipairs(commands) do exec(cmd) end
-    return true
+    for _, cmd in ipairs(cmds) do exec(cmd) end
 end
 
--- Save/Load Packages
-function savePackages()
-    local file = io.open(PACKAGE_FILE, "w")
-    if file then
-        for _, pkg in ipairs(packages) do file:write(pkg.name .. "|" .. pkg.package .. "\n") end
-        file:close()
-        return true
+-- ================= DASHBOARD UI =================
+
+function drawDashboard()
+    io.write("\27[2J\27[H") -- Clear Screen
+    
+    print(C_CYAN .. C_BOLD)
+    print("███████╗███████╗███████╗███╗   ██╗")
+    print("╚══███╔╝██╔════╝██╔════╝████╗  ██║")
+    print("  ███╔╝ █████╗  █████╗  ██╔██╗ ██║")
+    print(" ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║")
+    print("███████╗███████╗███████╗██║ ╚████║")
+    print("╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝")
+    print("        ZEEN TOOLS v1.0.0         ")
+    print(C_RESET)
+    
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
+    print(string.format("%s%-3s | %-16s | %-8s | %-12s%s", C_BOLD, "No", "Nama Akun", "RAM", "Status", C_RESET))
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
+    
+    for i, pkg in ipairs(packages) do
+        -- Aturan Warna Status v1.0.0
+        local statusColor = C_WHITE -- Default (Reseting, Boosting, Optimized, Launched, Waiting)
+        
+        if pkg.status == "Online" or pkg.status == "Ready" then
+            statusColor = C_GREEN
+        elseif pkg.status == "Retrying" then
+            statusColor = C_RED
+        end
+        
+        local displayName = pkg.real_user
+        if string.len(displayName) > 14 then displayName = string.sub(displayName, 1, 13) .. "." end
+        
+        print(string.format("%-3d | %-16s | %-8s | %s%-12s%s", 
+            i, displayName, pkg.ram, statusColor, pkg.status, C_RESET
+        ))
     end
-    return false
+    print(C_WHITE .. "──────────────────────────────────────────────────" .. C_RESET)
+    
+    local activePkg = packages[current_monitoring_index] or {}
+    local progressText = activePkg.status or "Idle"
+    print(string.format("%sMonitoring: %d/%d (%s)%s", C_BOLD, current_monitoring_index, #packages, progressText, C_RESET))
+    print(C_WHITE .. "\n[CTRL+C] Stop Script" .. C_RESET)
 end
+
+-- ================= STATE MACHINE LOGIC =================
+
+function processAppLogic(index, totalApps)
+    local pkg = packages[index]
+    
+    -- STATE MACHINE
+    if pkg.state_step == 0 then
+        -- Step 0: Initial
+        pkg.status = "Reseting"
+        pkg.state_step = 1
+        
+    elseif pkg.state_step == 1 then
+        -- Step 1: Force Stop
+        pkg.status = "Reseting"
+        exec("am force-stop " .. pkg.package)
+        if pkg.real_user == "Scanning..." then pkg.real_user = getRobloxUsername(pkg.package) end
+        pkg.state_step = 2
+        
+    elseif pkg.state_step == 2 then
+        -- Step 2: Boosting
+        pkg.status = "Boosting"
+        exec("pm trim-caches 50M") 
+        pkg.state_step = 3
+        
+    elseif pkg.state_step == 3 then
+        -- Step 3: Optimized
+        pkg.status = "Optimized"
+        optimizeSystem() 
+        pkg.state_step = 4
+        
+    elseif pkg.state_step == 4 then
+        -- Step 4: Ready & Config (HIJAU)
+        pkg.status = "Ready"
+        modifyPrefs(pkg.package, index, totalApps)
+        pkg.state_step = 5
+        -- Beri jeda sebentar di status Ready biar terlihat user
+        pkg.wait_timer = 2 
+        
+    elseif pkg.state_step == 5 then
+        -- Step 5: Launching
+        if pkg.wait_timer > 0 then
+            pkg.wait_timer = pkg.wait_timer - 1
+        else
+            pkg.status = "Launched"
+            exec("am start " .. pkg.package)
+            pkg.state_step = 6
+            pkg.wait_timer = 6 -- Tunggu 6 detik sebelum cek Online
+        end
+        
+    elseif pkg.state_step == 6 then
+        -- Step 6: Checking Online Status (HIJAU)
+        if pkg.wait_timer > 0 then
+            pkg.wait_timer = pkg.wait_timer - 1
+        else
+            local check = exec("pidof " .. pkg.package)
+            if check and check ~= "" then
+                pkg.status = "Online"
+                -- Pindah ke app berikutnya
+                if current_monitoring_index < totalApps then
+                    current_monitoring_index = current_monitoring_index + 1
+                end
+            else
+                pkg.status = "Retrying" -- (MERAH)
+                pkg.state_step = 1 
+            end
+        end
+        
+    elseif pkg.state_step == 7 then
+        -- Step 7: Maintenance (Cek crash)
+        local check = exec("pidof " .. pkg.package)
+        if not check or check == "" then
+            pkg.status = "Retrying" -- (MERAH)
+            pkg.state_step = 1 
+            current_monitoring_index = index -- Fokus balik
+        else
+            pkg.status = "Online" -- (HIJAU)
+        end
+    end
+end
+
+-- ================= MAIN MONITORING LOOP =================
+
+function startMonitoring()
+    if #packages == 0 then print("✗ No packages!"); return end
+    
+    for i, p in ipairs(packages) do
+        p.status = "Waiting"
+        p.ram = "0 MB"
+        p.real_user = "Scanning..."
+        p.state_step = 0
+        p.wait_timer = 0
+    end
+    
+    current_monitoring_index = 1
+    updateScreenResolution()
+    
+    while true do
+        loop_counter = loop_counter + 1
+        
+        -- Proses Monitoring
+        if current_monitoring_index <= #packages then
+            processAppLogic(current_monitoring_index, #packages)
+        end
+        
+        -- Background Maintenance (Cek setiap 10 loop)
+        if loop_counter % 10 == 0 then
+            for i = 1, current_monitoring_index - 1 do
+                processAppLogic(i, #packages) -- Masuk step 7
+            end
+        end
+        
+        -- Update RAM (Interval Tertentu)
+        if loop_counter % RAM_UPDATE_INTERVAL == 0 then
+            for i, p in ipairs(packages) do
+                if p.state_step >= 5 then p.ram = getRamUsage(p.package) end
+            end
+        end
+        
+        drawDashboard()
+        exec("sleep " .. REFRESH_RATE)
+    end
+end
+
+-- ================= MENU =================
 
 function loadPackages()
     local file = io.open(PACKAGE_FILE, "r")
@@ -244,133 +326,73 @@ function loadPackages()
         packages = {}
         for line in file:lines() do
             local name, package = line:match("(.+)|(.+)")
-            if name and package then table.insert(packages, {name = name, package = package}) end
+            if name and package then 
+                table.insert(packages, {
+                    name = name, 
+                    package = package,
+                    status = "Waiting",
+                    ram = "-",
+                    real_user = "Unknown",
+                    state_step = 0
+                }) 
+            end
         end
         file:close()
     end
 end
 
--- Menu Settings
-function showSettings()
-    while true do
-        print("\n══ SETTINGS ══")
-        print("Current Delay: " .. config.delay .. " seconds")
-        print()
-        print("1. Ubah Delay (Detik)")
-        print("2. Kembali")
-        io.write("Pilih: ")
-        local choice = io.read()
-        
-        if choice == "1" then
-            io.write("Masukkan delay baru (detik): ")
-            local newDelay = tonumber(io.read())
-            if newDelay and newDelay > 0 then
-                config.delay = newDelay
-                saveConfig()
-                print("✓ Delay disimpan: " .. newDelay .. "s")
-            else
-                print("✗ Input tidak valid!")
-            end
-        elseif choice == "2" then
-            break
-        end
+function savePackages()
+    local file = io.open(PACKAGE_FILE, "w")
+    if file then
+        for _, pkg in ipairs(packages) do file:write(pkg.name .. "|" .. pkg.package .. "\n") end
+        file:close()
     end
 end
 
--- Auto-detect Roblox
 function autoDetectRoblox()
-    print("\n══ AUTO-DETECT ROBLOX ══")
-    local result = exec("pm list packages | grep 'roblox'")
+    print("\nScanning...")
+    local res = exec("pm list packages | grep 'roblox'")
     local detected = {}
-    for line in result:gmatch("[^\r\n]+") do
+    for line in res:gmatch("[^\r\n]+") do
         local pkg = line:match("package:(.+)")
         if pkg then table.insert(detected, pkg) end
     end
-    
-    if #detected == 0 then print("✗ Tidak ada Roblox ditemukan."); io.read(); return end
-    
-    print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' untuk add.")
-    io.write("Pilihan: ")
-    if io.read() == "all" then
-        for _, pkg in ipairs(detected) do
-            local exists = false
-            for _, p in ipairs(packages) do if p.package == pkg then exists = true end end
-            if not exists then
-                local name = pkg:match("com%.roblox%.(.+)") or pkg
-                name = name:gsub("%.", " "):gsub("^%l", string.upper)
-                table.insert(packages, {name = "Roblox " .. name, package = pkg})
-                print("  + " .. name)
+    if #detected > 0 then
+        print("Found " .. #detected .. ". Add all? (y/n)")
+        if io.read() == "y" then
+            for _, pkg in ipairs(detected) do
+                local exists = false
+                for _, p in ipairs(packages) do if p.package == pkg then exists = true end end
+                if not exists then
+                    local name = pkg:match("com%.roblox%.(.+)") or pkg
+                    name = name:gsub("%.", " "):gsub("^%l", string.upper)
+                    table.insert(packages, {name = "Roblox "..name, package = pkg})
+                end
             end
+            savePackages()
+            print("Saved.")
         end
-        savePackages()
+    else
+        print("No Roblox found.")
     end
-end
-
--- Launch Loop
-function launchAutoGrid()
-    print("\n══ AUTO GRID LAUNCH ══")
-    if #packages == 0 then print("✗ No packages!"); return end
-    
-    updateScreenResolution()
-    local numApps = #packages
-    
-    if numApps >= 5 and numApps <= 6 then
-        print("ℹ Mode: 1:2.5 Split (Safe Bar)")
-    end
-    
-    print("ℹ Delay per app: " .. config.delay .. "s")
-    io.write("Lanjutkan? (y/n): ")
-    if io.read() ~= "y" then return end
-    
-    local maxApps = math.min(8, numApps)
-    for i = 1, maxApps do
-        local pkg = packages[i]
-        print("\n[" .. i .. "/" .. maxApps .. "] " .. pkg.name)
-        
-        exec("am force-stop " .. pkg.package)
-        os.execute("sleep 0.5") -- Short wait for kill
-        
-        modifyUGClonerPrefs(pkg.package, i, numApps)
-        
-        exec("am start " .. pkg.package)
-        print("→ Launched.")
-        
-        if i < maxApps then
-            print("⏳ Waiting " .. config.delay .. "s...")
-            os.execute("sleep " .. config.delay)
-        else
-            print("✓ Last app launched.")
-        end
-    end
-    print("\n✓ DONE ALL!")
-end
-
--- Main Menu
-function showMenu()
-    print("\nZEEN TOOLS v4.3")
-    print("1. Auto Grid Launch")
-    print("2. Detect Roblox")
-    print("3. List Packages")
-    print("4. Settings (Delay)")
-    print("5. Clear Data")
-    print("6. Exit")
-    io.write("Pilih: ")
-    return io.read()
 end
 
 function main()
     io.stdout:setvbuf("no")
     loadPackages()
-    loadConfig() -- Load settingan user
-    updateScreenResolution()
     while true do
-        local choice = showMenu()
-        if choice == "1" then launchAutoGrid()
-        elseif choice == "2" then autoDetectRoblox()
-        elseif choice == "3" then for i,p in ipairs(packages) do print(i..". "..p.name) end 
-        elseif choice == "4" then showSettings()
-        elseif choice == "5" then packages={}; savePackages(); print("Cleared.")
-        elseif choice == "6" then break 
+        io.write("\27[2J\27[H")
+        print("ZEEN TOOLS v1.0.0")
+        print("1. START MONITORING & LAUNCH")
+        print("2. Detect Packages")
+        print("3. Reset Data")
+        print("4. Exit")
+        io.write("Select: ")
+        local c = io.read()
+        if c == "1" then startMonitoring()
+        elseif c == "2" then autoDetectRoblox(); io.read()
+        elseif c == "3" then packages={}; savePackages(); print("Reset!"); io.read()
+        elseif c == "4" then break 
         end
     end
 end
