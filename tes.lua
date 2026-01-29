@@ -1,28 +1,31 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v8.3 (STABLE FINAL)
+-- PROJECT ZEEN TOOLS v8.4 (FINAL STABLE)
 -- ==========================================
--- Update v8.3:
--- [+] UI FIX: Menggunakan Fixed Width Formatting (Anti Geser)
--- [+] NET SAFE: Network Kill DIMATIKAN (Hanya Visual)
--- [+] REAL COUNT: Menghitung App Aktif berdasarkan PID
--- [+] KEYBOARD: Input Fix tetap aktif
+-- Update v8.4:
+-- [+] SCANNING LOOP: Indikator monitoring berputar (1->6->1)
+-- [+] NET KILL ON: Mematikan app jika koneksi stuck/gagal
+-- [+] UI CLEAN: Menghapus kolom NET
+-- [+] KEYBOARD FIX: Perbaikan tombol Backspace
 -- ==========================================
 
--- 1. SETUP TERMINAL
-os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
+-- 1. SETUP TERMINAL TOTAL
+-- stty sane: Reset terminal
+-- erase ^H: Fix tombol backspace
+-- cooked: Mode edit aktif
+os.execute("stty sane cooked erase ^H echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
 local WATCHDOG_INTERVAL = 2   
-local GRACE_PERIOD = 90       -- Toleransi loading 90 detik
+local GRACE_PERIOD = 90       -- Waktu kebal 90 detik awal
 local QUEUE_DELAY = 30        
 local STABLE_TIME = 60        
-local TRAFFIC_THRESHOLD = 100 -- Batas data (Visual Only)
-local ENABLE_NET_KILL = false -- [SAFETY] JANGAN KILL KARENA SINYAL
+local TRAFFIC_THRESHOLD = 100 -- Ambang batas data (bytes)
+local MAX_STRIKES = 5         -- Jika 5x (10-15 detik) data 0, KILL.
 
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -46,6 +49,7 @@ local device_name = "Android Device"
 -- Variabel Kontrol
 local launch_queue_index = 1    
 local next_launch_time = 0 
+local current_scan_index = 1 -- Counter Visual Berputar
 
 -- ==========================================
 -- FUNGSI UI & HELPER
@@ -56,7 +60,8 @@ function trim(s)
 end
 
 function safe_input(prompt)
-    os.execute("stty cooked icrnl echo >/dev/null 2>&1")
+    -- Reset terminal agar Backspace berfungsi sebelum input
+    os.execute("stty sane cooked erase ^H echo >/dev/null 2>&1")
     io.stdout:flush()
     io.write(prompt)
     io.stdout:flush()
@@ -226,9 +231,8 @@ function sendDiscordWebhook()
 
         local status_icon = is_online and "🟢" or "🔴"
         local ram_val = (is_online and rss_kb) and string.format("%dMB", rss_kb) or "0MB"
-        local net_stat = state.netStatus or "OK"
         
-        local field_val = string.format("`⏱️ %s | 💾 %s | 📶 %s`", uptime, ram_val, net_stat)
+        local field_val = string.format("`⏱️ %s | 💾 %s`", uptime, ram_val)
         if not is_online then field_val = "`🔻 OFFLINE`" end
         if state.status == "Ready" then field_val = "`⏳ QUEUE`" end
         
@@ -285,11 +289,10 @@ function cleanupAndPrepare()
     buffer = buffer .. "========================================\r\n"
     local any_reset = false
     for i, pkg in ipairs(packages) do
-        -- Init State: START FRESH
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
-            lastBytes = 0, strikes = 0, netStatus = "Init"
+            lastBytes = 0, strikes = 0
         }
         
         local pid_out = exec("pidof " .. pkg.package)
@@ -306,22 +309,22 @@ function cleanupAndPrepare()
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP (FIX UI & COUNT)
+-- MAIN MONITOR LOOP
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
     
     launch_queue_index = 1    
     next_launch_time = os.time()
+    current_scan_index = 1 -- Start 1
     local next_webhook_time = os.time() + 5 
     
-    -- Clear awal
     clearScreen()
 
     while true do
         local current_time = os.time()
         
-        -- A. UPDATE LAUNCHER
+        -- UPDATE LOGIC LAUNCHER
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
@@ -334,93 +337,82 @@ function startMonitoring()
                 state.ignoreUntil = current_time + GRACE_PERIOD
                 state.strikes = 0
                 state.lastBytes = getNetworkBytes(state.uid)
-                state.netStatus = "Init"
                 
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
         end
 
-        -- B. RENDER DASHBOARD (FIX UI)
+        -- UPDATE VISUAL SCAN (BERPUTAR 1 -> 6 -> 1)
+        current_scan_index = current_scan_index + 1
+        if current_scan_index > #packages then current_scan_index = 1 end
+
+        -- RENDER BUFFER
         local buffer = ""
         local free_ram = getFreeRAM()
         
-        -- HITUNG REAL ACTIVE APP (Yang punya PID)
-        local active_count = 0
-        for _, pkg in ipairs(packages) do
-            local pid_out = exec("pidof " .. pkg.package)
-            if pid_out ~= "" then active_count = active_count + 1 end
-        end
-
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v8.3 (STABLE FINAL)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v8.4 (FINAL STABLE)\r\n"
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" ACTIVE APPS: %d/%d     \r\n", active_count, #packages)
+        buffer = buffer .. string.format(" SCANNING   : [%d/%d]    \r\n", current_scan_index, #packages)
         buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
         buffer = buffer .. "==============================================\r\n"
-        -- FIXED WIDTH HEADER
-        buffer = buffer .. string.format(" %-2s %-12s %-14s %s\r\n", "NO", "NAME", "STATUS", "NET")
+        buffer = buffer .. string.format(" %-2s %-12s %-16s\r\n", "NO", "NAME", "STATUS")
         buffer = buffer .. "----------------------------------------------\r\n"
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
-            local net_text = "-"
             local force_kill = false
             
+            -- INDIKATOR VISUAL
+            local pointer = (i == current_scan_index) and ">" or " "
+            
             if state.status == "Ready" then
-                -- Warna Cyan
-                status_text = "\027[1;36mReady\027[0m       " 
+                status_text = "\027[1;36mReady\027[0m" 
             
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
                 -- 1. GRACE PERIOD (Loading)
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
-                    -- Warna Kuning
-                    -- Format fixed width 14 char agar tidak geser
-                    local str = string.format("Load (%ds)", timeLeft)
-                    status_text = string.format("\027[1;33m%-14s\027[0m", str) 
-                    
+                    status_text = string.format("\027[1;33mLoad (%ds)\027[0m", timeLeft) 
                     state.status = "ALIVE"
                     state.lastBytes = getNetworkBytes(state.uid) 
-                    net_text = "Wait"
                 else
-                    -- 2. NORMAL MONITORING
+                    -- 2. NORMAL MONITORING (PID + TRAFFIC)
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
+                        -- PID ADA, CEK TRAFFIC
                         local currBytes = getNetworkBytes(state.uid)
                         local delta = currBytes - state.lastBytes
                         state.lastBytes = currBytes
                         
-                        -- MONITOR DATA (VISUAL ONLY - NO KILL)
+                        -- TRAFFIC LOGIC (ACTIVE KILL ENABLED)
                         if delta < TRAFFIC_THRESHOLD then
                             state.strikes = state.strikes + 1
-                            net_text = string.format("\027[1;31mSTUCK (%d)\027[0m", state.strikes)
-                            -- JIKA ENABLE_NET_KILL = true baru kill
-                            if ENABLE_NET_KILL and state.strikes >= 20 then force_kill = true end
+                            -- Beri peringatan visual
+                            status_text = string.format("\027[1;31mSTUCK (%d)\027[0m", state.strikes)
+                            
+                            -- KILL JIKA STRIKES SUDAH MAKSIMAL
+                            if state.strikes >= MAX_STRIKES then force_kill = true end
                         else
                             state.strikes = 0
-                            local kbs = math.floor(delta / 1024 / WATCHDOG_INTERVAL)
-                            net_text = string.format("\027[1;32m%d KB\027[0m", kbs)
+                            local duration = current_time - state.startTime
+                            if duration < STABLE_TIME then 
+                                status_text = "\027[1;32mLaunch\027[0m"
+                            else 
+                                status_text = "\027[1;32;1mOnline\027[0m" 
+                            end 
                         end
-                        state.netStatus = net_text 
-
-                        local duration = current_time - state.startTime
-                        if duration < STABLE_TIME then 
-                            status_text = "\027[1;32mLaunch        \027[0m"
-                        else 
-                            status_text = "\027[1;32;1mOnline        \027[0m" 
-                        end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mCrash         \027[0m" 
+                        status_text = "\027[1;31mCrash\027[0m" 
                         state.status = "DEAD"
-                        net_text = "Dead"
                     end
                 end
             end
 
-            -- RESTART LOGIC (Only PID Crash or Explicit Kill)
+            -- RESTART LOGIC
             if force_kill or state.status == "DEAD" then
                 state.status = "DEAD" 
                 local time_since_last_restart = current_time - global_last_restart
@@ -432,18 +424,15 @@ function startMonitoring()
                     state.status = "ALIVE"
                     state.strikes = 0
                     global_last_restart = current_time 
+                    -- Jika karena kill, status text akan ter-override di loop berikutnya jadi Load
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    local str = string.format("Queue(%ds)", wait_left)
-                    status_text = string.format("\027[1;31m%-14s\027[0m", str)
+                    status_text = string.format("\027[1;31mQueue(%ds)\027[0m", wait_left)
                 end
             end
             
-            -- UI NAME TRUNCATE (Max 12 chars)
             local shortName = pkg.name:sub(1, 12)
-            -- FORMAT DATA FIXED WIDTH:
-            -- [%d] Name(12) Status(14) Net
-            buffer = buffer .. string.format(" [%d] %-12s %s %s\r\n", i, shortName, status_text, net_text)
+            buffer = buffer .. string.format("%s[%d] %-12s %s\r\n", pointer, i, shortName, status_text)
         end
         
         buffer = buffer .. "==============================================\r\n"
@@ -457,7 +446,6 @@ function startMonitoring()
             buffer = buffer .. "\027[K\r" 
         end
         
-        -- RENDER
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
@@ -604,7 +592,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v8.3 (STABLE FINAL)\r\n")
+        io.write("ZEEN TOOLS v8.4 (FINAL STABLE)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
