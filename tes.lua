@@ -1,24 +1,20 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v7.5 (KERNEL FIX)
+-- PROJECT ZEEN TOOLS v7.6 (LOGIC FIX)
 -- ==========================================
--- Update v7.5:
--- [+] FIX ENTER (^M): Memaksa mode ICRNL
--- [+] FIX BACKSPACE (^?): Memaksa mode COOKED
--- [+] STABILITAS: Tetap menggunakan Buffer UI
+-- Update v7.6:
+-- [+] FIX MONITOR COUNT: Menghitung app aktif, bukan antrian
+-- [+] STATUS FLOW: Ready -> Launched -> Online (Accurate)
+-- [+] KERNEL INPUT: Tetap menggunakan fix keyboard v7.5
 -- ==========================================
 
 -- 1. SETUP TERMINAL TOTAL
--- stty sane   : Reset ke default
--- cooked      : Aktifkan mode edit (Backspace berfungsi)
--- icrnl       : Ubah Enter (CR) jadi Newline (NL) agar io.read jalan
--- echo        : Munculkan teks
 os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- FUNGSI DISPLAY & UI (SAFE INPUT)
+-- FUNGSI DISPLAY & UI
 -- ==========================================
 
 function trim(s)
@@ -26,22 +22,17 @@ function trim(s)
 end
 
 function safe_input(prompt)
-    -- Pastikan terminal dalam mode 'cooked' (bisa edit/backspace) sebelum input
     os.execute("stty cooked icrnl echo >/dev/null 2>&1")
-    
     io.stdout:flush()
     io.write(prompt)
     io.stdout:flush()
-    
     local result = io.read()
-    
-    -- Jika input error, return kosong
     if not result then return "" end
     return trim(result)
 end
 
 function clearScreen()
-    io.write("\027[H\027[2J") -- Clear Total + Home
+    io.write("\027[H\027[2J") 
     io.stdout:flush()
 end
 
@@ -49,9 +40,9 @@ end
 -- KONFIGURASI SYSTEM
 -- ==========================================
 local WATCHDOG_INTERVAL = 2   
-local GRACE_PERIOD = 35       
+local GRACE_PERIOD = 35       -- Waktu tunggu loading (Kuning)
 local QUEUE_DELAY = 30        
-local STABLE_TIME = 60
+local STABLE_TIME = 60        -- Waktu untuk dianggap Online Stabil (Hijau)
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
 local DISPLAY_WIDTH = 1280 
@@ -76,7 +67,7 @@ local launch_queue_index = 1
 local next_launch_time = 0      
 
 -- ==========================================
--- SYSTEM HELPERS (SILENT)
+-- SYSTEM HELPERS
 -- ==========================================
 
 function exec(cmd)
@@ -258,32 +249,26 @@ function hardExit()
     io.write("      STOPPING PROCESSES...     \r\n")
     io.write("================================\r\n")
     io.stdout:flush()
-    
     os.execute("pkill -9 sleep >/dev/null 2>&1")
     os.execute("pkill -9 curl >/dev/null 2>&1")
     os.execute("pkill -9 read >/dev/null 2>&1")
-    
-    -- [FIX] Reset terminal ke mode normal + cooked saat keluar
     os.execute("stty sane cooked icrnl echo >/dev/null 2>&1")
-    
     io.write("\n✓ Stopped. Bye!\r\n")
     io.stdout:flush()
     os.exit()
 end
 
 -- ==========================================
--- PRE-FLIGHT CHECK (RESETTING)
+-- PRE-FLIGHT CHECK
 -- ==========================================
 function cleanupAndPrepare()
     local buffer = ""
     buffer = buffer .. "========================================\r\n"
     buffer = buffer .. "     PREPARING ENVIRONMENT...\r\n"
     buffer = buffer .. "========================================\r\n"
-    
     local any_reset = false
     for i, pkg in ipairs(packages) do
         app_states[pkg.package] = { startTime = 0, status = "Ready", ignoreUntil = 0 }
-        
         local pid_out = exec("pidof " .. pkg.package)
         if pid_out and pid_out ~= "" then
             any_reset = true
@@ -291,17 +276,14 @@ function cleanupAndPrepare()
             exec("am force-stop " .. pkg.package .. " >/dev/null 2>&1")
         end
     end
-    
     if not any_reset then buffer = buffer .. " [System] Clean. Starting...\r\n" end
-    
     io.write("\027[H\027[2J" .. buffer)
     io.stdout:flush()
-    
     if any_reset then os.execute("sleep 2") else os.execute("sleep 1") end
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP (TRAP SIGNAL)
+-- MAIN MONITOR LOOP (FIX COUNT & STATUS)
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
@@ -313,6 +295,7 @@ function startMonitoring()
     while true do
         local current_time = os.time()
         
+        -- A. UPDATE LAUNCHER LOGIC
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
@@ -326,15 +309,24 @@ function startMonitoring()
             end
         end
 
+        -- B. RENDER BUFFER
         local buffer = ""
         local free_ram = getFreeRAM()
-        local current_monitor_idx = math.min(launch_queue_index, #packages)
-        if launch_queue_index > #packages then current_monitor_idx = #packages end
+        
+        -- [FIX MONITOR COUNT]
+        -- Hitung manual berapa app yang TIDAK "Ready"
+        -- Ini lebih akurat daripada pakai indeks antrian
+        local launched_count = 0
+        for _, pkg in ipairs(packages) do
+            if app_states[pkg.package].status ~= "Ready" then
+                launched_count = launched_count + 1
+            end
+        end
 
         buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v7.5 (KERNEL FIX)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v7.6 (LOGIC FIX)\r\n"
         buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", current_monitor_idx, #packages, free_ram)
+        buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", launched_count, #packages, free_ram)
         buffer = buffer .. "========================================\r\n"
 
         for i, pkg in ipairs(packages) do
@@ -343,17 +335,24 @@ function startMonitoring()
             
             if state.status == "Ready" then
                 status_text = "\027[1;36mReady\027[0m" 
+            
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
                 if current_time < state.ignoreUntil then
+                    -- GRACE PERIOD (Loading Awal) -> Warna Kuning
                     local timeLeft = state.ignoreUntil - current_time
                     status_text = string.format("\027[1;33mLaunched (%ds)\027[0m", timeLeft) 
                     state.status = "ALIVE"
                 else
+                    -- AFTER GRACE PERIOD -> Cek PID
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
                         local duration = current_time - state.startTime
-                        if duration < STABLE_TIME then status_text = "\027[1;32mLaunched\027[0m"
-                        else status_text = "\027[1;32mOnline\027[0m" end 
+                        -- Jika PID ada dan waktu > STABLE_TIME (60s), maka ONLINE (Hijau)
+                        if duration < STABLE_TIME then 
+                            status_text = "\027[1;32mLaunched\027[0m" -- Hijau Biasa
+                        else 
+                            status_text = "\027[1;32;1mOnline\027[0m" -- Hijau Tebal (Indikasi masuk game)
+                        end 
                         state.status = "ALIVE"
                     else
                         status_text = "\027[1;31mRetrying...\027[0m" 
@@ -362,6 +361,7 @@ function startMonitoring()
                 end
             end
 
+            -- RESTART LOGIC
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 if time_since_last_restart >= QUEUE_DELAY then
@@ -394,7 +394,7 @@ function startMonitoring()
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
-        -- INPUT CHECK DENGAN TRAP CTRL+C
+        -- INPUT CHECK
         local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
         local handle = io.popen(cmd)
         local output = handle:read("*a")
@@ -532,16 +532,13 @@ function launchAutoGrid()
 end
 
 function main()
-    -- [FIX FINAL] 
-    -- cooked: Agar backspace bekerja
-    -- icrnl:  Agar Enter terbaca sebagai Newline
     os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
     
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v7.5 (KERNEL FIX)\r\n")
+        io.write("ZEEN TOOLS v7.6 (LOGIC FIX)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
