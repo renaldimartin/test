@@ -1,47 +1,47 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.5 (HARD FIX)
+-- PROJECT ZEEN TOOLS v5.6 (INPUT FIX)
 -- ==========================================
--- Update v5.5:
--- [+] MANUAL PRINT: Tidak pakai print() bawaan
--- [+] FORCE CR (\r): Memaksa kursor ke kiri
--- [+] INPUT FLUSH: Memperbaiki input macet
+-- Update v5.6:
+-- [+] FORCE ECHO: Memunculkan ketikan keyboard
+-- [+] AUTO REPAIR: Perbaikan otomatis saat start
 -- ==========================================
 
--- 1. PAKSA TERMINAL KE MODE NORMAL SEBELUM APA-APA
+-- 1. RESET TERMINAL & AKTIFKAN INPUT (ECHO)
 os.execute("stty sane") 
-os.execute("stty -raw echo")
-
--- 2. MATIKAN BUFFERING AGAR TEKS MUNCUL LANGSUNG
+os.execute("stty echo") -- Ini kuncinya agar huruf muncul
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- INTI PERBAIKAN (CUSTOM PRINT)
+-- FUNGSI INPUT & DISPLAY (SANGAT AMAN)
 -- ==========================================
--- Kita timpa fungsi print bawaan yang error
--- Fungsi ini memaksa setiap baris diakhiri \r\n
--- \r = Carriage Return (Geser mentok kiri)
--- \n = New Line (Turun baris)
 
 function safe_print(str)
     str = tostring(str or "")
     io.write(str .. "\r\n")
-    io.stdout:flush() -- Paksa tampil ke layar
+    io.stdout:flush()
 end
 
--- Override fungsi global
+-- Override fungsi print
 print = safe_print
 
 function safe_input(prompt)
+    -- Pastikan mode ECHO aktif sebelum meminta input
+    os.execute("stty echo") 
+    io.write("\027[?25h") -- Pastikan kursor muncul
+    
     io.write(prompt)
-    io.stdout:flush() -- Pastikan teks "Pilih:" muncul dulu
-    local result = io.read() -- Baca input
+    io.stdout:flush()
+    
+    local result = io.read()
+    
+    -- Jika input kosong/error, kembalikan string kosong
+    if not result then return "" end
     return result
 end
 
 function clearScreen()
-    -- Gunakan clear native
     os.execute("clear")
 end
 
@@ -244,13 +244,13 @@ function startMonitoring()
         -- Reset kursor manual
         io.write("\027[H") 
         
-        print("========================================")
-        print("     ZEEN TOOLS v5.5 (ULTIMATE)")
-        print("========================================")
-        print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
-        if vip_link ~= "" then print(" VIP Link: ACTIVE (Direct Pkg)")
-        else print(" VIP Link: -") end
-        print("========================================")
+        safe_print("========================================")
+        safe_print("     ZEEN TOOLS v5.6 (ULTIMATE)")
+        safe_print("========================================")
+        safe_print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
+        if vip_link ~= "" then safe_print(" VIP Link: ACTIVE (Direct Pkg)")
+        else safe_print(" VIP Link: -") end
+        safe_print("========================================")
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
@@ -292,7 +292,7 @@ function startMonitoring()
             io.stdout:flush()
         end
         
-        print("========================================")
+        safe_print("========================================")
         io.write(" CTRL+C to Stop & Exit to Shell ($)     \027[K\r\n")
         io.stdout:flush()
         
@@ -356,11 +356,11 @@ end
 function menuSettings()
     while true do
         clearScreen()
-        print("══ SETTINGS & EXTRAS ══")
-        print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
-        print("2. Set Private Server Link (VIP)")
-        print("3. Set Discord Webhook")
-        print("4. Kembali")
+        safe_print("══ SETTINGS & EXTRAS ══")
+        safe_print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
+        safe_print("2. Set Private Server Link (VIP)")
+        safe_print("3. Set Discord Webhook")
+        safe_print("4. Kembali")
         
         local c = safe_input("Pilih: ")
         
@@ -368,12 +368,12 @@ function menuSettings()
             config.delay = tonumber(safe_input("Delay (detik): ")) or 10
             saveAll()
         elseif c == "2" then
-            print("Masukkan Link VIP (Kosongkan untuk hapus):")
+            safe_print("Masukkan Link VIP (Kosongkan untuk hapus):")
             vip_link = safe_input(">> ")
             saveAll()
         elseif c == "3" then
-            print("1. Set URL")
-            print("2. Set Interval (Detik)")
+            safe_print("1. Set URL")
+            safe_print("2. Set Interval (Detik)")
             local wc = safe_input(">> ")
             if wc == "1" then 
                 webhook_conf.url = safe_input("Webhook URL: ")
@@ -387,16 +387,16 @@ end
 
 function autoDetectRoblox()
     clearScreen()
-    print("══ AUTO-DETECT ROBLOX ══")
+    safe_print("══ AUTO-DETECT ROBLOX ══")
     local result = exec("pm list packages | grep 'roblox'")
     local detected = {}
     for line in result:gmatch("[^\r\n]+") do
         local pkg = line:match("package:(.+)")
         if pkg then table.insert(detected, pkg) end
     end
-    if #detected == 0 then print("✗ Tidak ada Roblox."); safe_input("Tekan Enter..."); return end
+    if #detected == 0 then safe_print("✗ Tidak ada Roblox."); safe_input("Tekan Enter..."); return end
     
-    print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
+    safe_print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
     if safe_input("Pilihan: ") == "all" then
         for _, pkg in ipairs(detected) do
             local exists = false
@@ -413,8 +413,8 @@ end
 
 function launchAutoGrid()
     clearScreen()
-    print("══ LAUNCHING SEQUENCE ══")
-    if #packages == 0 then print("✗ No packages!"); safe_input("Enter..."); return end
+    safe_print("══ LAUNCHING SEQUENCE ══")
+    if #packages == 0 then safe_print("✗ No packages!"); safe_input("Enter..."); return end
     
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
@@ -434,7 +434,7 @@ function launchAutoGrid()
     local maxApps = #packages
     for i = 1, maxApps do
         local pkg = packages[i]
-        print("[" .. i .. "] Launching " .. pkg.name .. "...")
+        safe_print("[" .. i .. "] Launching " .. pkg.name .. "...")
         modifyUGClonerPrefs(pkg.package, i, maxApps)
         killAndStart(pkg.package, true)
         app_states[pkg.package] = { startTime = os.time(), status = "Launched" }
@@ -445,21 +445,17 @@ function launchAutoGrid()
 end
 
 function main()
-    -- FINAL FIX: Override print agar selalu menggunakan \r\n
-    -- Ini mengabaikan apakah terminal mode raw atau cooked
-    print = safe_print
-
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        print("ZEEN TOOLS v5.5 (ULTIMATE FIX)")
-        print("1. Start Auto Grid & Monitor")
-        print("2. Detect Roblox")
-        print("3. List Packages")
-        print("4. Settings (VIP/Webhook)")
-        print("5. Clear Data")
-        print("6. Exit")
+        safe_print("ZEEN TOOLS v5.6 (INPUT FIX)")
+        safe_print("1. Start Auto Grid & Monitor")
+        safe_print("2. Detect Roblox")
+        safe_print("3. List Packages")
+        safe_print("4. Settings (VIP/Webhook)")
+        safe_print("5. Clear Data")
+        safe_print("6. Exit")
         
         local choice = safe_input("Pilih: ")
         
@@ -467,11 +463,11 @@ function main()
         elseif choice == "2" then autoDetectRoblox()
         elseif choice == "3" then 
             clearScreen()
-            print("=== LIST PACKAGES ===")
-            for i,p in ipairs(packages) do print(i..". "..p.name) end 
+            safe_print("=== LIST PACKAGES ===")
+            for i,p in ipairs(packages) do safe_print(i..". "..p.name) end 
             safe_input("\nTekan Enter kembali...")
         elseif choice == "4" then menuSettings()
-        elseif choice == "5" then packages={}; saveAll(); print("Cleared."); safe_input("Enter...")
+        elseif choice == "5" then packages={}; saveAll(); safe_print("Cleared."); safe_input("Enter...")
         elseif choice == "6" then 
             os.execute("stty sane")
             break 
