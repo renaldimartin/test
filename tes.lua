@@ -1,21 +1,20 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.1 (ULTIMATE)
+-- PROJECT ZEEN TOOLS v5.2 (STABLE UI)
 -- Auto Grid - Monitoring - Webhook
 -- ==========================================
--- Update v5.1:
--- [+] FIX VIP LINK: Force open in App (-p flag)
--- [+] FIX CTRL+C: Force Exit to Shell ($)
--- [+] SMART QUEUE: Restart antri 30 detik
--- [+] NO-BLINK DASHBOARD: UI Stabil
--- [+] ZOMBIE KILLER: Deteksi proses macet
+-- Update v5.2 (FIX CRITICAL UI):
+-- [+] FIX: Menu berantakan (Staircase effect)
+-- [+] FIX: Input macet/tidak muncul
+-- [+] FIX: Kursor hilang saat kembali ke menu
+-- [+] ADD: Terminal Reset saat start
 -- ==========================================
 
 -- KONFIGURASI SYSTEM
-local WATCHDOG_INTERVAL = 5   -- Refresh dashboard tiap 5 detik
-local QUEUE_DELAY = 30        -- Jeda restart antar aplikasi (detik)
-local STABLE_TIME = 60        -- Waktu dianggap "Online"
+local WATCHDOG_INTERVAL = 5
+local QUEUE_DELAY = 30
+local STABLE_TIME = 60
 
 -- KONFIGURASI DEFAULT
 local STATUS_BAR_HEIGHT = 60
@@ -40,8 +39,29 @@ local vip_link = ""
 local device_name = "Android Device"
 
 -- ==========================================
--- SYSTEM HELPERS
+-- TERMINAL UTILS (FIX UI)
 -- ==========================================
+
+function resetTerminal()
+    -- Munculkan kursor kembali & reset atribut warna
+    io.write("\027[?25h") 
+    io.write("\027[0m")
+    io.stdout:flush()
+end
+
+function clearScreen()
+    -- Bersihkan layar dengan aman
+    io.write("\027[H\027[2J")
+    io.stdout:flush()
+end
+
+-- Override print agar selalu flush dan rapi
+local old_print = print
+function print(str)
+    str = str or ""
+    io.write(str .. "\n")
+    io.stdout:flush()
+end
 
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
@@ -110,11 +130,10 @@ function modifyUGClonerPrefs(package, position, numApps)
 end
 
 -- ==========================================
--- APP MANAGEMENT & STATS
+-- APP MANAGEMENT
 -- ==========================================
 
 function getProcessInfo(package)
-    -- Mengembalikan PID, Status (R/S/Z), dan RSS (RAM in KB)
     local out = exec("ps -A -o pid,state,rss,args | grep " .. package .. " | grep -v grep | head -n 1")
     local pid, state, rss = out:match("(%d+)%s+([%w])%s+(%d+)")
     return pid, state, tonumber(rss)
@@ -124,18 +143,15 @@ function killAndStart(package, isFirstTime)
     exec("am force-stop " .. package)
     
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
-        -- FIXED: Menggunakan flag -p untuk memaksa membuka link DI DALAM package tersebut
-        -- Ini mencegah link terbuka di Browser/Chrome
         local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s", vip_link, package)
         exec(cmd)
     else
-        -- Launch Normal
         exec("am start " .. package)
     end
 end
 
 -- ==========================================
--- WEBHOOK SYSTEM (DISCORD)
+-- WEBHOOK
 -- ==========================================
 function sendDiscordWebhook()
     if webhook_conf.url == "" then return end
@@ -196,10 +212,9 @@ function sendDiscordWebhook()
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP
+-- MONITORING LOOP
 -- ==========================================
 function startMonitoring()
-    -- Initial State Setup
     for i, pkg in ipairs(packages) do
         if not app_states[pkg.package] then
             app_states[pkg.package] = { startTime = os.time(), status = "Init" }
@@ -209,22 +224,18 @@ function startMonitoring()
     local next_webhook_time = os.time() + 5 
 
     io.write("\027[?25l") -- Hide Cursor
-    io.write("\027[2J")   -- Clear Screen Once
+    io.write("\027[2J")   -- Clear Screen
 
     while true do
         local current_time = os.time()
-        
         io.write("\027[H") -- Reset Cursor (No Blink)
         
         print("========================================")
-        print("     ZEEN TOOLS v5.1 (ULTIMATE)")
+        print("     ZEEN TOOLS v5.2 (ULTIMATE)")
         print("========================================")
         print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
-        if vip_link ~= "" then
-            print(" VIP Link: ACTIVE (Direct Pkg)")
-        else
-            print(" VIP Link: -")
-        end
+        if vip_link ~= "" then print(" VIP Link: ACTIVE (Direct Pkg)")
+        else print(" VIP Link: -") end
         print("========================================")
 
         for i, pkg in ipairs(packages) do
@@ -232,32 +243,23 @@ function startMonitoring()
             local pid, proc_state, rss = getProcessInfo(pkg.package)
             local status_text = "Unknown"
             
-            -- LOGIC CHECK
             if pid then
                 if proc_state == "Z" then
-                    -- ZOMBIE DETECTED
                     status_text = "Retrying (Zombie)"
                     exec("kill -9 " .. pid)
                     state.status = "DEAD"
                 else
-                    -- PROCESS ALIVE
                     local duration = current_time - state.startTime
-                    if duration < STABLE_TIME then
-                        status_text = "Launched"
-                    else
-                        status_text = "Online"
-                    end
+                    if duration < STABLE_TIME then status_text = "Launched"
+                    else status_text = "Online" end
                     state.status = "ALIVE"
                 end
             else
-                -- PROCESS DEAD
                 state.status = "DEAD"
             end
 
-            -- QUEUE LOGIC FOR DEAD APPS
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
-                
                 if time_since_last_restart >= QUEUE_DELAY then
                     status_text = "Retrying..."
                     killAndStart(pkg.package, false)
@@ -277,26 +279,24 @@ function startMonitoring()
         print("========================================")
         print(" CTRL+C to Stop & Exit to Shell ($)     \027[K")
         
-        -- WEBHOOK CHECK
         if webhook_conf.url ~= "" and current_time >= next_webhook_time then
             io.write(" [Sending Webhook...]\027[K\r")
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
         end
         
-        -- FIX CTRL+C: Safe Sleep
-        -- Jika sleep diinterupsi oleh CTRL+C, dia akan mengembalikan status gagal/nil
-        -- Maka kita paksa exit program.
+        -- FIX CTRL+C SAFE EXIT
+        io.stdout:flush()
         local sleep_ok = os.execute("sleep " .. WATCHDOG_INTERVAL)
         if not sleep_ok then
-            io.write("\027[?25h") -- Show Cursor
-            os.exit() -- Force Exit ke Shell
+            resetTerminal()
+            os.exit()
         end
     end
 end
 
 -- ==========================================
--- MENU & CONFIG
+-- MENU & CONFIG (UI FIX)
 -- ==========================================
 function loadData()
     local f = io.open(PACKAGE_FILE, "r")
@@ -339,15 +339,19 @@ end
 
 function menuSettings()
     while true do
-        print("\n══ SETTINGS & EXTRAS ══")
+        clearScreen()
+        print("══ SETTINGS & EXTRAS ══")
         print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
         print("2. Set Private Server Link (VIP)")
         print("3. Set Discord Webhook")
         print("4. Kembali")
         io.write("Pilih: ")
+        io.stdout:flush() -- FIX INPUT MACET
+        
         local c = io.read()
         if c == "1" then
-            io.write("Delay (detik): "); config.delay = tonumber(io.read()) or 10; saveAll()
+            io.write("Delay (detik): "); io.stdout:flush()
+            config.delay = tonumber(io.read()) or 10; saveAll()
         elseif c == "2" then
             print("Masukkan Link VIP (Kosongkan untuk hapus):")
             vip_link = io.read()
@@ -355,17 +359,18 @@ function menuSettings()
         elseif c == "3" then
             print("1. Set URL")
             print("2. Set Interval (Detik)")
-            io.write(">> ")
+            io.write(">> "); io.stdout:flush()
             local wc = io.read()
-            if wc == "1" then io.write("Webhook URL: "); webhook_conf.url = io.read()
-            elseif wc == "2" then io.write("Interval (cth: 300): "); webhook_conf.interval = tonumber(io.read()) or 300 end
+            if wc == "1" then io.write("Webhook URL: "); io.stdout:flush(); webhook_conf.url = io.read()
+            elseif wc == "2" then io.write("Interval (cth: 300): "); io.stdout:flush(); webhook_conf.interval = tonumber(io.read()) or 300 end
             saveAll()
         elseif c == "4" then break end
     end
 end
 
 function autoDetectRoblox()
-    print("\n══ AUTO-DETECT ROBLOX ══")
+    clearScreen()
+    print("══ AUTO-DETECT ROBLOX ══")
     local result = exec("pm list packages | grep 'roblox'")
     local detected = {}
     for line in result:gmatch("[^\r\n]+") do
@@ -374,7 +379,7 @@ function autoDetectRoblox()
     end
     if #detected == 0 then print("✗ Tidak ada Roblox."); io.read(); return end
     print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
-    io.write("Pilihan: ")
+    io.write("Pilihan: "); io.stdout:flush()
     if io.read() == "all" then
         for _, pkg in ipairs(detected) do
             local exists = false
@@ -390,8 +395,9 @@ function autoDetectRoblox()
 end
 
 function launchAutoGrid()
-    print("\n══ LAUNCHING SEQUENCE ══")
-    if #packages == 0 then print("✗ No packages!"); return end
+    clearScreen()
+    print("══ LAUNCHING SEQUENCE ══")
+    if #packages == 0 then print("✗ No packages!"); io.read(); return end
     
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
@@ -406,6 +412,7 @@ function launchAutoGrid()
     end
     
     io.write("Start Farming? (y/n): ")
+    io.stdout:flush()
     if io.read() ~= "y" then return end
     
     -- INITIAL LAUNCH
@@ -424,11 +431,14 @@ function launchAutoGrid()
 end
 
 function main()
+    -- FIX BUFFERING ISSUE
     io.stdout:setvbuf("no")
+    resetTerminal() -- RESET TERMINAL DI AWAL AGAR RAPI
     getDeviceName()
     loadData()
     while true do
-        print("\nZEEN TOOLS v5.1 (ULTIMATE)")
+        clearScreen()
+        print("ZEEN TOOLS v5.2 (ULTIMATE)")
         print("1. Start Auto Grid & Monitor")
         print("2. Detect Roblox")
         print("3. List Packages")
@@ -436,13 +446,22 @@ function main()
         print("5. Clear Data")
         print("6. Exit")
         io.write("Pilih: ")
+        io.stdout:flush() -- PENTING! Agar input muncul
+        
         local choice = io.read()
         if choice == "1" then launchAutoGrid()
         elseif choice == "2" then autoDetectRoblox()
-        elseif choice == "3" then for i,p in ipairs(packages) do print(i..". "..p.name) end 
+        elseif choice == "3" then 
+            clearScreen()
+            print("=== LIST PACKAGES ===")
+            for i,p in ipairs(packages) do print(i..". "..p.name) end 
+            print("\nTekan Enter kembali...")
+            io.read()
         elseif choice == "4" then menuSettings()
-        elseif choice == "5" then packages={}; saveAll(); print("Cleared.")
-        elseif choice == "6" then break 
+        elseif choice == "5" then packages={}; saveAll(); print("Cleared."); io.read()
+        elseif choice == "6" then 
+            resetTerminal() -- KEMBALIKAN KURSOR SAAT KELUAR
+            break 
         end
     end
 end
