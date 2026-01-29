@@ -1,17 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v6.0 (SILENT & STABLE)
+-- PROJECT ZEEN TOOLS v7.0 (DASHBOARD FIRST)
 -- ==========================================
--- Update v6.0:
--- [+] ANTI-FLICKER: UI Diam & Halus
--- [+] RAM MONITOR: Menampilkan Free RAM
--- [+] SILENT EXIT: Tidak ada log sampah saat Q
--- [+] APP 1 FIX: Absolute Grace Period
+-- Update v7.0:
+-- [+] DASHBOARD FIRST: UI langsung muncul saat start
+-- [+] QUEUE SYSTEM: Launching dilakukan di background
+-- [+] STATUS READY: Menampilkan antrian sebelum launch
+-- [+] AUTO RESET: Kill sisa app aktif sebelum mulai
 -- ==========================================
 
--- 1. SETUP TERMINAL
-os.execute("stty sane") 
+-- 1. SETUP TERMINAL (Silent Mode)
+os.execute("stty sane >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
@@ -20,8 +20,7 @@ io.stdout:setvbuf("no")
 
 function safe_print(str)
     str = tostring(str or "")
-    -- \027[K membersihkan sisa karakter di baris tersebut agar tidak ada "hantu"
-    io.write(str .. "\027[K\r\n")
+    io.write(str .. "\027[K\r\n") -- Clear Line + CR + LF
     io.stdout:flush()
 end
 print = safe_print
@@ -31,7 +30,7 @@ function trim(s)
 end
 
 function safe_input(prompt)
-    os.execute("stty sane")
+    os.execute("stty sane >/dev/null 2>&1")
     io.write(prompt)
     io.stdout:flush()
     local result = io.read()
@@ -40,24 +39,21 @@ function safe_input(prompt)
 end
 
 function clearScreen()
-    -- Clear total (Hanya dipakai saat pindah menu)
-    io.write("\027[H\027[2J")
+    io.write("\027[H\027[2J") -- Clear total
     io.stdout:flush()
 end
 
 function resetCursor()
-    -- Kembalikan kursor ke pojok kiri atas TANPA menghapus layar
-    -- Ini rahasia agar tidak kedip
-    io.write("\027[H")
+    io.write("\027[H") -- Reset ke pojok kiri atas
     io.stdout:flush()
 end
 
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local WATCHDOG_INTERVAL = 5
-local GRACE_PERIOD = 30       -- Diperpanjang ke 30s agar App 1 aman
-local QUEUE_DELAY = 30        
+local WATCHDOG_INTERVAL = 2   -- Refresh UI lebih cepat (2s) agar animasi launch halus
+local GRACE_PERIOD = 35       -- Masa tenggang launch
+local QUEUE_DELAY = 30        -- Jeda antrian restart jika crash
 local STABLE_TIME = 60
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -78,8 +74,12 @@ local webhook_conf = { url = "", interval = 300 }
 local vip_link = ""
 local device_name = "Android Device"
 
+-- Variabel Kontrol Launching
+local launch_queue_index = 1    -- App ke berapa yg akan dibuka
+local next_launch_time = 0      -- Kapan app berikutnya dibuka
+
 -- ==========================================
--- SYSTEM HELPERS
+-- SYSTEM HELPERS (SILENT)
 -- ==========================================
 
 function exec(cmd)
@@ -87,13 +87,10 @@ function exec(cmd)
     if not f then return "" end
     f:write("#!/system/bin/sh\n" .. cmd .. "\n")
     f:close()
-    os.execute("chmod +x " .. TEMP_SCRIPT)
-    
-    -- Bungkus stderr ke null agar tidak bocor ke layar
+    os.execute("chmod +x " .. TEMP_SCRIPT .. " >/dev/null 2>&1")
     local handle = io.popen("su -c '" .. TEMP_SCRIPT .. "' 2>/dev/null")
     local result = handle:read("*a")
     handle:close()
-    
     os.remove(TEMP_SCRIPT)
     return result or ""
 end
@@ -122,10 +119,8 @@ function getGridPositions(numApps)
     local h_slot = math.floor(usable_height / 3)
     local active_width_limit = math.floor(DISPLAY_WIDTH * (2 / 3))
     local w_slot = math.floor(active_width_limit / 2)
-    
     local y1, y2, y3 = STATUS_BAR_HEIGHT, STATUS_BAR_HEIGHT + h_slot, STATUS_BAR_HEIGHT + (h_slot*2)
     local b1, b2, b3 = y1 + h_slot, y2 + h_slot, DISPLAY_HEIGHT 
-    
     return {
         {name="R1 Left",  left=0, top=y1, right=w_slot, bottom=b1},
         {name="R1 Right", left=w_slot, top=y1, right=active_width_limit, bottom=b1},
@@ -164,19 +159,26 @@ end
 -- ==========================================
 
 function getProcessInfo(package)
-    -- Menggunakan ps -A agar lebih kompatibel dengan Android modern
-    local out = exec("ps -A -o pid,state,rss,args | grep " .. package .. " | grep -v grep | head -n 1")
-    local pid, state, rss = out:match("(%d+)%s+([%w])%s+(%d+)")
-    return pid, state, tonumber(rss)
+    local pid_out = exec("pidof " .. package)
+    local pid = pid_out:match("(%d+)")
+    
+    local rss = 0
+    if pid then
+        local rss_out = exec("ps -p " .. pid .. " -o rss | tail -n 1")
+        rss = tonumber(rss_out:match("(%d+)")) or 0
+    end
+    return pid, "S", rss 
 end
 
 function killAndStart(package)
-    exec("am force-stop " .. package)
+    -- Hapus sisa-sisa sebelum start
+    exec("am force-stop " .. package .. " >/dev/null 2>&1")
+    
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
-        local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s", vip_link, package)
+        local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s >/dev/null 2>&1", vip_link, package)
         exec(cmd)
     else
-        exec("am start " .. package)
+        exec("am start " .. package .. " >/dev/null 2>&1")
     end
 end
 
@@ -193,31 +195,41 @@ function sendDiscordWebhook()
     
     for _, pkg in ipairs(packages) do
         local state = app_states[pkg.package]
-        local is_launching = (os.time() < state.ignoreUntil)
-        local pid, proc_state, rss_kb = nil, nil, nil
-        
-        if not is_launching then
-             pid, proc_state, rss_kb = getProcessInfo(pkg.package)
-        end
-        
-        local is_online = is_launching or (pid and proc_state ~= "Z")
-        
-        local status_icon = "🔴"
-        local ram_usage = "0MB"
+        -- Logic: Launching OR Running
+        local is_online = false
+        local rss_kb = 0
         local uptime = "0m"
         
-        if is_online then
-            total_online = total_online + 1
-            status_icon = "🟢"
-            if rss_kb then ram_usage = string.format("%dMB", math.floor(rss_kb/1024)) end
-            local diff = os.time() - state.startTime
-            uptime = string.format("%dm", math.floor(diff/60))
-        else
+        if state.status == "Ready" then
+            -- Skip webhook count for Ready apps or treat as offline/pending
             total_offline = total_offline + 1
+        else
+            local is_launching = (os.time() < state.ignoreUntil)
+            local pid = nil
+            if not is_launching then
+                 pid, _, rss_kb = getProcessInfo(pkg.package)
+            end
+            
+            if is_launching or pid then
+                is_online = true
+                total_online = total_online + 1
+                if rss_kb then 
+                    local mb = math.floor(rss_kb/1024)
+                    if mb > 0 then rss_kb = mb else rss_kb = 0 end
+                end
+                local diff = os.time() - state.startTime
+                uptime = string.format("%dm", math.floor(diff/60))
+            else
+                total_offline = total_offline + 1
+            end
         end
 
-        local field_val = string.format("`⏱️ %s | 💾 %s | ⚙️ N/A`", uptime, ram_usage)
+        local status_icon = is_online and "🟢" or "🔴"
+        local ram_val = (is_online and rss_kb) and string.format("%dMB", rss_kb) or "0MB"
+        
+        local field_val = string.format("`⏱️ %s | 💾 %s`", uptime, ram_val)
         if not is_online then field_val = "`🔻 OFFLINE`" end
+        if state.status == "Ready" then field_val = "`⏳ QUEUE`" end
         
         fields = fields .. string.format('{"name": "%s ||%s||", "value": "%s", "inline": false},', status_icon, pkg.name, field_val)
     end
@@ -244,110 +256,159 @@ function sendDiscordWebhook()
     ]], time_now, device_name, total_online, total_offline, #packages, color, fields, time_now)
 
     local curl_cmd = string.format("curl -H \"Content-Type: application/json\" -X POST -d '%s' %s", json_payload:gsub("\n", " "), webhook_conf.url)
-    -- Bungkus curl ke null juga
     os.execute(curl_cmd .. " > /dev/null 2>&1 &") 
 end
 
--- ==========================================
--- KILL SWITCH (CLEAN EXIT)
--- ==========================================
 function hardExit()
-    -- Bersihkan layar sebelum pesan keluar
     clearScreen()
     print("================================")
     print("      STOPPING PROCESSES...     ")
     print("================================")
-    
-    os.execute("pkill -9 sleep")
-    os.execute("pkill -9 curl")
-    os.execute("stty sane")
-    
+    os.execute("pkill -9 sleep >/dev/null 2>&1")
+    os.execute("pkill -9 curl >/dev/null 2>&1")
+    os.execute("stty sane >/dev/null 2>&1")
     print("\n✓ Stopped. Bye!")
     os.exit()
 end
 
 -- ==========================================
--- MONITORING LOOP
+-- PRE-FLIGHT CHECK (RESETTING)
+-- ==========================================
+function cleanupAndPrepare()
+    -- Cek apakah ada app yang sedang berjalan, jika ada kill dulu
+    clearScreen()
+    print("========================================")
+    print("     PREPARING ENVIRONMENT...")
+    print("========================================")
+    
+    local any_reset = false
+    for i, pkg in ipairs(packages) do
+        local pid = exec("pidof " .. pkg.package)
+        if pid and pid ~= "" then
+            any_reset = true
+            print(string.format(" [Resetting] %s...", pkg.name))
+            exec("am force-stop " .. pkg.package .. " >/dev/null 2>&1")
+        end
+        -- Inisialisasi status awal
+        app_states[pkg.package] = {
+            startTime = 0,
+            status = "Ready",
+            ignoreUntil = 0
+        }
+    end
+    
+    if any_reset then
+        os.execute("sleep 2") -- Beri waktu sistem kill
+    else
+        print(" [System] Clean. Starting...")
+        os.execute("sleep 1")
+    end
+end
+
+-- ==========================================
+-- MAIN MONITOR LOOP (DASHBOARD FIRST)
 -- ==========================================
 function startMonitoring()
-    for i, pkg in ipairs(packages) do
-        if not app_states[pkg.package] then
-            app_states[pkg.package] = { 
-                startTime = os.time(), 
-                status = "Init",
-                ignoreUntil = os.time() + GRACE_PERIOD 
-            }
-        end
-    end
+    -- 1. Bersihkan sisa-sisa app lama
+    cleanupAndPrepare()
+    
+    -- 2. Setup Variable Kontrol
+    launch_queue_index = 1    -- Mulai dari app pertama
+    next_launch_time = os.time() -- Launch pertama langsung sekarang
     
     local next_webhook_time = os.time() + 5 
     
-    -- Clear awal saja
     clearScreen()
-    os.execute("stty sane") 
+    os.execute("stty sane >/dev/null 2>&1") 
 
     while true do
         local current_time = os.time()
         
-        -- RESET KURSOR (JANGAN CLEAR LAYAR, CUKUP OVERWRITE)
+        -- A. RESET KURSOR (UI STABIL)
         resetCursor()
         
-        -- Ambil RAM
+        -- B. HEADER
         local free_ram = getFreeRAM()
-        
         safe_print("========================================")
-        safe_print("     ZEEN TOOLS v6.0 (SILENT & STABLE)")
+        safe_print("     ZEEN TOOLS v7.0 (DASHBOARD FIRST)")
         safe_print("========================================")
-        safe_print(string.format(" Monitor : %d Apps    |    RAM: %s", #packages, free_ram))
-        safe_print(" Queue   : 30s        |    VIP: " .. (vip_link ~= "" and "ON" or "OFF"))
+        safe_print(string.format(" MONITORING    : %d/%d      |  FREE RAM : %s", #packages, #packages, free_ram))
         safe_print("========================================")
 
+        -- C. LOGIC LAUNCHER (BACKGROUND)
+        -- Cek apakah masih ada antrian yang perlu di-launch
+        if launch_queue_index <= #packages then
+            -- Cek apakah sudah waktunya launch app ini
+            if current_time >= next_launch_time then
+                local pkg = packages[launch_queue_index]
+                
+                -- Lakukan Launch (Tanpa Sleep panjang!)
+                modifyUGClonerPrefs(pkg.package, launch_queue_index, #packages)
+                killAndStart(pkg.package)
+                
+                -- Update Status Aplikasi ini
+                app_states[pkg.package].status = "Launched"
+                app_states[pkg.package].startTime = current_time
+                app_states[pkg.package].ignoreUntil = current_time + GRACE_PERIOD
+                
+                -- Set jadwal untuk app berikutnya
+                launch_queue_index = launch_queue_index + 1
+                next_launch_time = current_time + config.delay
+            end
+        end
+
+        -- D. LOOP STATUS APPS
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
-            local status_text = "Unknown"
+            local status_text = "\027[1;30mUnknown\027[0m"
             
-            -- [LOGIKA ABSOLUTE] JIKA IGNORE, JANGAN SENTUH PID
-            if current_time < state.ignoreUntil then
-                local timeLeft = state.ignoreUntil - current_time
-                status_text = string.format("\027[1;33mStarting (%ds)\027[0m", timeLeft)
-                state.status = "ALIVE" -- Paksa Alive
-            else
-                local pid, proc_state, rss = getProcessInfo(pkg.package)
-                
-                if pid then
-                    if proc_state == "Z" then
-                        status_text = "\027[1;31mZombie (Kill)\027[0m"
-                        exec("kill -9 " .. pid)
-                        state.status = "DEAD"
-                    else
+            -- LOGIKA DISPLAY BERDASARKAN STATE
+            if state.status == "Ready" then
+                -- Belum giliran launch
+                status_text = "\027[1;36mReady\027[0m" -- Cyan
+            
+            elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
+                -- Sudah pernah di-launch, sekarang cek kondisinya
+                if current_time < state.ignoreUntil then
+                    -- Masih masa tenggang (Grace Period) -> Tampilkan Launched
+                    local timeLeft = state.ignoreUntil - current_time
+                    status_text = string.format("\027[1;33mLaunched (%ds)\027[0m", timeLeft) -- Yellow
+                    state.status = "ALIVE"
+                else
+                    -- Masa tenggang habis, cek PID
+                    local pid, _, _ = getProcessInfo(pkg.package)
+                    if pid then
                         local duration = current_time - state.startTime
                         if duration < STABLE_TIME then status_text = "\027[1;32mLaunched\027[0m"
-                        else status_text = "\027[1;32mOnline\027[0m" end
+                        else status_text = "\027[1;32mOnline\027[0m" end -- Green
                         state.status = "ALIVE"
+                    else
+                        status_text = "\027[1;31mRetrying...\027[0m" -- Red
+                        state.status = "DEAD"
                     end
-                else
-                    state.status = "DEAD"
                 end
             end
 
-            -- RESTART LOGIC
+            -- LOGIKA RESTART (Jika status DEAD dan sudah melewati masa tunggu)
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 
                 if time_since_last_restart >= QUEUE_DELAY then
-                    status_text = "\027[1;31mRetrying...\027[0m"
+                    -- Restart sekarang
                     killAndStart(pkg.package)
                     state.startTime = current_time
-                    global_last_restart = current_time
-                    state.ignoreUntil = current_time + GRACE_PERIOD 
+                    state.ignoreUntil = current_time + GRACE_PERIOD
                     state.status = "ALIVE"
+                    global_last_restart = current_time
                 else
+                    -- Masih antri restart
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    status_text = string.format("Queue (%ds)", wait_left)
+                    status_text = string.format("\027[1;31mRetrying (%ds)\027[0m", wait_left)
                 end
             end
             
             local shortName = pkg.name:sub(1, 15)
+            -- Format Dashboard: [1] Nama : Status
             io.write(string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text))
             io.stdout:flush()
         end
@@ -355,19 +416,17 @@ function startMonitoring()
         safe_print("========================================")
         safe_print(" [TEKAN 'q' LALU ENTER UNTUK KELUAR]    ")
         
-        -- WEBHOOK
+        -- E. WEBHOOK
         if webhook_conf.url ~= "" and current_time >= next_webhook_time then
-            -- Print di baris khusus status tanpa merusak layout
             io.write("\027[K\r[Sending Webhook...]") 
             io.stdout:flush()
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
         else
-            io.write("\027[K\r") -- Bersihkan baris status webhook jika tidak kirim
+            io.write("\027[K\r") 
         end
         
-        -- NON-BLOCKING INPUT (SILENT)
-        -- Gunakan 2>/dev/null untuk membuang error sh: read: timeout
+        -- F. INPUT CHECK (NON-BLOCKING)
         local handle = io.popen("read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input")
         local user_input = nil
         if handle then
@@ -483,9 +542,8 @@ function autoDetectRoblox()
 end
 
 function launchAutoGrid()
-    clearScreen()
-    safe_print("══ LAUNCHING SEQUENCE ══")
-    if #packages == 0 then safe_print("✗ No packages!"); safe_input("Enter..."); return end
+    -- LANGSUNG KE FUNGSI MONITORING
+    -- Launch logic dipindah ke dalam monitoring loop agar dashboard muncul duluan
     
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
@@ -498,34 +556,23 @@ function launchAutoGrid()
             if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
         end
     end
+
+    clearScreen()
+    safe_print("══ DASHBOARD LAUNCH ══")
+    if #packages == 0 then safe_print("✗ No packages!"); safe_input("Enter..."); return end
     
-    if safe_input("Start Farming? (y/n): ") ~= "y" then return end
-    
-    app_states = {}
-    local maxApps = #packages
-    for i = 1, maxApps do
-        local pkg = packages[i]
-        safe_print("[" .. i .. "] Launching " .. pkg.name .. "...")
-        modifyUGClonerPrefs(pkg.package, i, maxApps)
-        killAndStart(pkg.package)
-        app_states[pkg.package] = { 
-            startTime = os.time(), 
-            status = "Launched",
-            ignoreUntil = os.time() + GRACE_PERIOD 
-        }
-        if i < maxApps then os.execute("sleep " .. config.delay) end
-    end
+    if safe_input("Start Monitoring? (y/n): ") ~= "y" then return end
     
     startMonitoring()
 end
 
 function main()
-    os.execute("stty sane") 
+    os.execute("stty sane >/dev/null 2>&1") 
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        safe_print("ZEEN TOOLS v6.0 (SILENT & STABLE)")
+        safe_print("ZEEN TOOLS v7.0 (DASHBOARD FIRST)")
         safe_print("1. Start Auto Grid & Monitor")
         safe_print("2. Detect Roblox")
         safe_print("3. List Packages")
