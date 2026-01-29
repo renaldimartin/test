@@ -1,12 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v7.6 (LOGIC FIX)
+-- PROJECT ZEEN TOOLS v8.1 (ULTIMATE MERGE)
 -- ==========================================
--- Update v7.6:
--- [+] FIX MONITOR COUNT: Menghitung app aktif, bukan antrian
--- [+] STATUS FLOW: Ready -> Launched -> Online (Accurate)
--- [+] KERNEL INPUT: Tetap menggunakan fix keyboard v7.5
+-- Update v8.1:
+-- [+] MERGE: Menggabungkan Traffic Watchdog & UI Fix
+-- [+] UI FIX: Free RAM di bawah, Counter Loop (1/6)
+-- [+] TRAFFIC MONITOR: Deteksi Disconnect via Data
+-- [+] SMART QUEUE: Restart antri satu per satu
 -- ==========================================
 
 -- 1. SETUP TERMINAL TOTAL
@@ -40,9 +41,12 @@ end
 -- KONFIGURASI SYSTEM
 -- ==========================================
 local WATCHDOG_INTERVAL = 2   
-local GRACE_PERIOD = 35       -- Waktu tunggu loading (Kuning)
-local QUEUE_DELAY = 30        
-local STABLE_TIME = 60        -- Waktu untuk dianggap Online Stabil (Hijau)
+local GRACE_PERIOD = 40       -- Waktu kebal awal (40s)
+local QUEUE_DELAY = 30        -- Jeda antar restart
+local STABLE_TIME = 60        
+local TRAFFIC_THRESHOLD = 1024 -- Min 1KB data
+local MAX_STRIKES = 3         -- 3x Data macet = Kill
+
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
 local DISPLAY_WIDTH = 1280 
@@ -62,9 +66,10 @@ local webhook_conf = { url = "", interval = 300 }
 local vip_link = ""
 local device_name = "Android Device"
 
--- Variabel Kontrol Launching
+-- Variabel Kontrol
 local launch_queue_index = 1    
-local next_launch_time = 0      
+local next_launch_time = 0 
+local current_scan_index = 1 -- Counter Visual (1/6)
 
 -- ==========================================
 -- SYSTEM HELPERS
@@ -94,13 +99,30 @@ function getFreeRAM()
     local kb = output:match("(%d+)")
     if kb then
         local gb = tonumber(kb) / 1024 / 1024
-        return string.format("%.1f GB", gb)
+        return string.format("%.2f GB", gb)
     end
     return "Unknown"
 end
 
 -- ==========================================
--- LAYOUT LOGIC
+-- TRAFFIC MONITORING
+-- ==========================================
+function getAppUID(package)
+    local cmd = "stat -c %u /data/data/" .. package
+    local uid = exec(cmd):gsub("%s+", "")
+    if uid and tonumber(uid) then return tonumber(uid) end
+    return nil
+end
+
+function getNetworkBytes(uid)
+    if not uid then return 0 end
+    local cmd = "cat /proc/uid_stat/" .. uid .. "/tcp_rcv"
+    local bytes = exec(cmd):gsub("%s+", "")
+    return tonumber(bytes) or 0
+end
+
+-- ==========================================
+-- LAYOUT & CLONER
 -- ==========================================
 function getGridPositions(numApps)
     local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
@@ -143,13 +165,12 @@ function modifyUGClonerPrefs(package, position, numApps)
 end
 
 -- ==========================================
--- APP MANAGEMENT
+-- APP CONTROL
 -- ==========================================
 
 function getProcessInfo(package)
     local pid_out = exec("pidof " .. package)
     local pid = pid_out:match("(%d+)")
-    
     local rss = 0
     if pid then
         local rss_out = exec("ps -p " .. pid .. " -o rss | tail -n 1")
@@ -210,8 +231,9 @@ function sendDiscordWebhook()
 
         local status_icon = is_online and "🟢" or "🔴"
         local ram_val = (is_online and rss_kb) and string.format("%dMB", rss_kb) or "0MB"
+        local net_stat = state.netStatus or "OK"
         
-        local field_val = string.format("`⏱️ %s | 💾 %s`", uptime, ram_val)
+        local field_val = string.format("`⏱️ %s | 💾 %s | 📶 %s`", uptime, ram_val, net_stat)
         if not is_online then field_val = "`🔻 OFFLINE`" end
         if state.status == "Ready" then field_val = "`⏳ QUEUE`" end
         
@@ -268,7 +290,13 @@ function cleanupAndPrepare()
     buffer = buffer .. "========================================\r\n"
     local any_reset = false
     for i, pkg in ipairs(packages) do
-        app_states[pkg.package] = { startTime = 0, status = "Ready", ignoreUntil = 0 }
+        -- Init State (Gabungan v8 dan v7)
+        app_states[pkg.package] = { 
+            startTime = 0, status = "Ready", ignoreUntil = 0,
+            uid = getAppUID(pkg.package), 
+            lastBytes = 0, strikes = 0, netStatus = "Init"
+        }
+        
         local pid_out = exec("pidof " .. pkg.package)
         if pid_out and pid_out ~= "" then
             any_reset = true
@@ -283,105 +311,133 @@ function cleanupAndPrepare()
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP (FIX COUNT & STATUS)
+-- MAIN MONITOR LOOP (MERGED LOGIC)
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
     
     launch_queue_index = 1    
     next_launch_time = os.time()
+    current_scan_index = 1 
     local next_webhook_time = os.time() + 5 
     
     while true do
         local current_time = os.time()
         
-        -- A. UPDATE LAUNCHER LOGIC
+        -- A. UPDATE LAUNCHER
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
                 modifyUGClonerPrefs(pkg.package, launch_queue_index, #packages)
                 killAndStart(pkg.package)
-                app_states[pkg.package].status = "Launched"
-                app_states[pkg.package].startTime = current_time
-                app_states[pkg.package].ignoreUntil = current_time + GRACE_PERIOD
+                
+                local state = app_states[pkg.package]
+                state.status = "Launched"
+                state.startTime = current_time
+                state.ignoreUntil = current_time + GRACE_PERIOD
+                state.strikes = 0
+                state.lastBytes = getNetworkBytes(state.uid)
+                state.netStatus = "Init"
+                
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
         end
 
-        -- B. RENDER BUFFER
+        -- B. UPDATE VISUAL COUNTER (Looping)
+        current_scan_index = current_scan_index + 1
+        if current_scan_index > #packages then current_scan_index = 1 end
+
+        -- C. RENDER BUFFER
         local buffer = ""
         local free_ram = getFreeRAM()
         
-        -- [FIX MONITOR COUNT]
-        -- Hitung manual berapa app yang TIDAK "Ready"
-        -- Ini lebih akurat daripada pakai indeks antrian
-        local launched_count = 0
-        for _, pkg in ipairs(packages) do
-            if app_states[pkg.package].status ~= "Ready" then
-                launched_count = launched_count + 1
-            end
-        end
-
-        buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v7.6 (LOGIC FIX)\r\n"
-        buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", launched_count, #packages, free_ram)
-        buffer = buffer .. "========================================\r\n"
+        buffer = buffer .. "==============================================\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v8.1 (ULTIMATE)\r\n"
+        buffer = buffer .. "==============================================\r\n"
+        buffer = buffer .. string.format(" MONITORING : %d/%d\r\n", current_scan_index, #packages)
+        buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
+        buffer = buffer .. "==============================================\r\n"
+        buffer = buffer .. string.format(" %-3s %-12s %-16s %s\r\n", "NO", "NAME", "STATUS", "NET")
+        buffer = buffer .. "----------------------------------------------\r\n"
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "\027[1;30mUnknown\027[0m"
+            local net_text = "-"
+            local force_kill = false
+            
+            -- POINTER VISUAL
+            local pointer = (i == current_scan_index) and ">" or " "
             
             if state.status == "Ready" then
                 status_text = "\027[1;36mReady\027[0m" 
             
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
+                -- 1. GRACE PERIOD (Loading)
                 if current_time < state.ignoreUntil then
-                    -- GRACE PERIOD (Loading Awal) -> Warna Kuning
                     local timeLeft = state.ignoreUntil - current_time
-                    status_text = string.format("\027[1;33mLaunched (%ds)\027[0m", timeLeft) 
+                    status_text = string.format("\027[1;33mLoad (%ds)\027[0m", timeLeft) 
                     state.status = "ALIVE"
+                    state.lastBytes = getNetworkBytes(state.uid)
+                    net_text = "Wait"
                 else
-                    -- AFTER GRACE PERIOD -> Cek PID
+                    -- 2. NORMAL MONITORING (PID + TRAFFIC)
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
+                        local currBytes = getNetworkBytes(state.uid)
+                        local delta = currBytes - state.lastBytes
+                        state.lastBytes = currBytes
+                        
+                        -- Traffic Watchdog
+                        if delta < TRAFFIC_THRESHOLD then
+                            state.strikes = state.strikes + 1
+                            net_text = string.format("\027[1;31mLOW (%d)\027[0m", state.strikes)
+                            if state.strikes >= MAX_STRIKES then force_kill = true end
+                        else
+                            state.strikes = 0
+                            local kbs = math.floor(delta / 1024 / WATCHDOG_INTERVAL)
+                            net_text = string.format("\027[1;32m%d KB\027[0m", kbs)
+                        end
+                        state.netStatus = net_text 
+
                         local duration = current_time - state.startTime
-                        -- Jika PID ada dan waktu > STABLE_TIME (60s), maka ONLINE (Hijau)
-                        if duration < STABLE_TIME then 
-                            status_text = "\027[1;32mLaunched\027[0m" -- Hijau Biasa
-                        else 
-                            status_text = "\027[1;32;1mOnline\027[0m" -- Hijau Tebal (Indikasi masuk game)
-                        end 
+                        if duration < STABLE_TIME then status_text = "\027[1;32mLaunch\027[0m"
+                        else status_text = "\027[1;32;1mOnline\027[0m" end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mRetrying...\027[0m" 
+                        status_text = "\027[1;31mCrash\027[0m" 
                         state.status = "DEAD"
+                        net_text = "Dead"
                     end
                 end
             end
 
             -- RESTART LOGIC
-            if state.status == "DEAD" then
+            if force_kill or state.status == "DEAD" then
+                state.status = "DEAD" 
                 local time_since_last_restart = current_time - global_last_restart
+                
                 if time_since_last_restart >= QUEUE_DELAY then
+                    if force_kill then status_text = "\027[1;31mKILLED\027[0m" end
                     killAndStart(pkg.package)
                     state.startTime = current_time
                     state.ignoreUntil = current_time + GRACE_PERIOD
                     state.status = "ALIVE"
-                    global_last_restart = current_time
+                    state.strikes = 0
+                    global_last_restart = current_time 
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    status_text = string.format("\027[1;31mRetrying (%ds)\027[0m", wait_left)
+                    status_text = string.format("\027[1;31mQueue(%ds)\027[0m", wait_left)
                 end
             end
             
-            local shortName = pkg.name:sub(1, 15)
-            buffer = buffer .. string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text)
+            local shortName = pkg.name:sub(1, 12)
+            buffer = buffer .. string.format("%s[%d] %-12s %-16s %s\r\n", pointer, i, shortName, status_text, net_text)
         end
         
-        buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]   \027[K\r\n"
+        buffer = buffer .. "==============================================\r\n"
+        buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]         \027[K\r\n"
         
         if webhook_conf.url ~= "" and current_time >= next_webhook_time then
             buffer = buffer .. "[Sending Webhook...]\027[K\r"
@@ -394,7 +450,6 @@ function startMonitoring()
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
-        -- INPUT CHECK
         local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
         local handle = io.popen(cmd)
         local output = handle:read("*a")
@@ -538,7 +593,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v7.6 (LOGIC FIX)\r\n")
+        io.write("ZEEN TOOLS v8.1 (ULTIMATE)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
