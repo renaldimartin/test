@@ -1,19 +1,20 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v7.4 (KEYBOARD FIX)
+-- PROJECT ZEEN TOOLS v7.5 (KERNEL FIX)
 -- ==========================================
--- Update v7.4:
--- [+] FORCE ECHO: Memaksa huruf muncul saat diketik
--- [+] INPUT GUARD: Reset terminal sebelum read()
--- [+] STABILITAS: Dashboard & CTRL+C tetap aman
+-- Update v7.5:
+-- [+] FIX ENTER (^M): Memaksa mode ICRNL
+-- [+] FIX BACKSPACE (^?): Memaksa mode COOKED
+-- [+] STABILITAS: Tetap menggunakan Buffer UI
 -- ==========================================
 
--- 1. SETUP TERMINAL AGRESIF (Fix Keyboard Hilang)
--- sane: normalkan semua
--- echo: Wajibkan huruf muncul
--- onlcr: Fix baris baru
-os.execute("stty sane echo onlcr >/dev/null 2>&1") 
+-- 1. SETUP TERMINAL TOTAL
+-- stty sane   : Reset ke default
+-- cooked      : Aktifkan mode edit (Backspace berfungsi)
+-- icrnl       : Ubah Enter (CR) jadi Newline (NL) agar io.read jalan
+-- echo        : Munculkan teks
+os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
@@ -25,8 +26,8 @@ function trim(s)
 end
 
 function safe_input(prompt)
-    -- [FIX] Paksa mode ECHO aktif sebelum meminta input user
-    os.execute("stty echo >/dev/null 2>&1")
+    -- Pastikan terminal dalam mode 'cooked' (bisa edit/backspace) sebelum input
+    os.execute("stty cooked icrnl echo >/dev/null 2>&1")
     
     io.stdout:flush()
     io.write(prompt)
@@ -34,7 +35,7 @@ function safe_input(prompt)
     
     local result = io.read()
     
-    -- Jika input nil (EOF), return kosong
+    -- Jika input error, return kosong
     if not result then return "" end
     return trim(result)
 end
@@ -262,8 +263,8 @@ function hardExit()
     os.execute("pkill -9 curl >/dev/null 2>&1")
     os.execute("pkill -9 read >/dev/null 2>&1")
     
-    -- [FIX] Reset terminal & echo on exit
-    os.execute("stty sane echo >/dev/null 2>&1")
+    -- [FIX] Reset terminal ke mode normal + cooked saat keluar
+    os.execute("stty sane cooked icrnl echo >/dev/null 2>&1")
     
     io.write("\n✓ Stopped. Bye!\r\n")
     io.stdout:flush()
@@ -331,7 +332,7 @@ function startMonitoring()
         if launch_queue_index > #packages then current_monitor_idx = #packages end
 
         buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v7.4 (KEYBOARD FIX)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v7.5 (KERNEL FIX)\r\n"
         buffer = buffer .. "========================================\r\n"
         buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", current_monitor_idx, #packages, free_ram)
         buffer = buffer .. "========================================\r\n"
@@ -531,14 +532,16 @@ function launchAutoGrid()
 end
 
 function main()
-    -- [FIX UTAMA] Reset Terminal Total di Awal
-    os.execute("stty sane echo >/dev/null 2>&1") 
+    -- [FIX FINAL] 
+    -- cooked: Agar backspace bekerja
+    -- icrnl:  Agar Enter terbaca sebagai Newline
+    os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
     
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v7.4 (KEYBOARD FIX)\r\n")
+        io.write("ZEEN TOOLS v7.5 (KERNEL FIX)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
