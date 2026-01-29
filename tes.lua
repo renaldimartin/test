@@ -1,75 +1,45 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
---[[
-    ZEEN TOOLS v1.0.0 (Fixed)
-    - Safe Cache Clearing (No Data Loss)
-    - Flicker-Free Monitoring
-    - Full Setup Wizard
-]]
+-- Auto Grid Freeform v3.2 - UG Cloner Edition
+-- Supports UG Cloner apps with built-in floating
+-- Modifies XML preferences for precise grid positioning
+-- Handles various package naming patterns
+-- RIGHT SIDE LAYOUT (1:2 Split) with Status Bar Protection
 
--- ==========================================
--- CONFIGURATION & GLOBALS
--- ==========================================
+print("================================")
+print("  Auto Grid Freeform v3.2")
+print("  UG Cloner Edition")
+print("  Right Side Layout (1:2)")
+print("================================")
+print()
 
-local CONFIG_FILE = "/data/data/com.termux/files/home/.zeen_config.dat"
-local PACKAGE_FILE = "/data/data/com.termux/files/home/.zeen_packages.dat"
-local WEBHOOK_FILE = "/data/data/com.termux/files/home/.zeen_webhook.dat"
-local TEMP_SCRIPT = "/data/data/com.termux/files/home/.zeen_exec.sh"
+-- Display configuration (will be detected automatically)
+local DISPLAY_WIDTH = 0
+local DISPLAY_HEIGHT = 0
+local STATUS_BAR_HEIGHT = 80  -- Status bar protection area
+local CURRENT_ORIENTATION = "unknown"
 
--- Display
-local DISPLAY_WIDTH = 1280
-local DISPLAY_HEIGHT = 720
+-- File paths
+local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
+local TEMP_SCRIPT = "/data/data/com.termux/files/home/.temp_cmd.sh"
 
--- State
-local config = {
-    delay_launch = 10,
-    clear_cache_interval = 30, -- minutes
-    clear_cache_enabled = true,
-    rejoin_interval = 0, -- hours (0 = off)
-    device_name = "Android Device"
-}
-local webhook_config = {
-    url = "",
-    interval = 0
-}
+-- Data storage
 local packages = {}
-local app_states = {} -- Stores detailed state per app
-local last_webhook_time = 0
-local last_global_cache_clean = 0
+local active_tasks = {}
 
--- ANSI Colors & Controls
-local C_RESET = "\27[0m"
-local C_RED = "\27[31m"
-local C_GREEN = "\27[32m"
-local C_YELLOW = "\27[33m"
-local C_BLUE = "\27[34m"
-local C_MAGENTA = "\27[35m"
-local C_CYAN = "\27[36m"
-local C_WHITE = "\27[37m"
-local C_BOLD = "\27[1m"
-local C_HOME = "\27[H"   -- Move cursor to top-left
-local C_CLEAR = "\27[2J" -- Clear screen completely
-local C_HIDE = "\27[?25l" -- Hide cursor
-local C_SHOW = "\27[?25h" -- Show cursor
-
--- ==========================================
--- UTILITY FUNCTIONS
--- ==========================================
-
-function sleep(n)
-    os.execute("sleep " .. tonumber(n))
-end
-
--- Execute Root Command safely
+-- Execute root command via temp script file
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
-    if not f then return "" end
+    if not f then
+        return ""
+    end
     f:write("#!/system/bin/sh\n")
     f:write(cmd .. "\n")
     f:close()
     
     os.execute("chmod +x " .. TEMP_SCRIPT)
-    local output_file = "/data/data/com.termux/files/home/.zeen_output.txt"
+    
+    local output_file = "/data/data/com.termux/files/home/.temp_output.txt"
     os.execute("su -c '" .. TEMP_SCRIPT .. " > " .. output_file .. " 2>&1'")
     
     local result = ""
@@ -81,555 +51,847 @@ function exec(cmd)
     
     os.remove(TEMP_SCRIPT)
     os.remove(output_file)
-    if result then result = result:gsub("^%s*(.-)%s*$", "%1") end
+    
     return result
 end
 
-function get_device_name()
-    local model = exec("getprop ro.product.model")
-    if model and model ~= "" then config.device_name = model end
-end
-
--- ==========================================
--- FILE I/O
--- ==========================================
-
-function split(inputstr, sep)
-    if sep == nil then sep = "%s" end
-    local t={}
-    for str in string.gmatch(inputstr, "([^"..sep.."]+)") do table.insert(t, str) end
-    return t
-end
-
-function save_data()
-    -- Packages
-    local f = io.open(PACKAGE_FILE, "w")
-    if f then
-        for _, pkg in ipairs(packages) do
-            f:write(pkg.name .. "|" .. pkg.package .. "|" .. (pkg.ps_link or "") .. "\n")
+-- Detect orientation and screen size
+function detectDisplay()
+    print("→ Detecting screen configuration...")
+    
+    -- Get screen size
+    local sizeResult = exec("wm size")
+    local width, height = sizeResult:match("Physical size: (%d+)x(%d+)")
+    
+    if width and height then
+        width = tonumber(width)
+        height = tonumber(height)
+        
+        -- Determine orientation
+        if width > height then
+            CURRENT_ORIENTATION = "landscape"
+            DISPLAY_WIDTH = width
+            DISPLAY_HEIGHT = height
+        else
+            CURRENT_ORIENTATION = "portrait"
+            DISPLAY_WIDTH = height  -- Swap for consistent calculation
+            DISPLAY_HEIGHT = width
         end
-        f:close()
+        
+        print("✓ Screen Detected: " .. width .. "x" .. height)
+        print("✓ Orientation: " .. CURRENT_ORIENTATION)
+        print("✓ Using dimensions: " .. DISPLAY_WIDTH .. "x" .. DISPLAY_HEIGHT)
+        return true
+    else
+        -- Fallback to dumpsys
+        local dumpResult = exec("dumpsys window | grep 'cur='")
+        width, height = dumpResult:match("cur=(%d+)x(%d+)")
+        
+        if width and height then
+            width = tonumber(width)
+            height = tonumber(height)
+            
+            if width > height then
+                CURRENT_ORIENTATION = "landscape"
+                DISPLAY_WIDTH = width
+                DISPLAY_HEIGHT = height
+            else
+                CURRENT_ORIENTATION = "portrait"
+                DISPLAY_WIDTH = height
+                DISPLAY_HEIGHT = width
+            end
+            
+            print("✓ Screen Detected (fallback): " .. width .. "x" .. height)
+            print("✓ Orientation: " .. CURRENT_ORIENTATION)
+            return true
+        end
     end
     
-    -- Config
-    f = io.open(CONFIG_FILE, "w")
-    if f then
-        f:write("delay_launch=" .. config.delay_launch .. "\n")
-        f:write("clear_cache_interval=" .. config.clear_cache_interval .. "\n")
-        f:write("clear_cache_enabled=" .. tostring(config.clear_cache_enabled) .. "\n")
-        f:write("rejoin_interval=" .. config.rejoin_interval .. "\n")
-        f:close()
+    -- If detection failed, use defaults
+    print("⚠ Could not detect screen size, using defaults")
+    DISPLAY_WIDTH = 1280
+    DISPLAY_HEIGHT = 720
+    CURRENT_ORIENTATION = "landscape"
+    return false
+end
+
+-- Legacy function for compatibility
+function getOrientation()
+    return CURRENT_ORIENTATION
+end
+
+-- Determine layout type based on number of apps
+function getLayoutType(numApps)
+    -- Always use right side 3x2 layout (6 apps max)
+    return "right_3x2"
+end
+
+-- Get grid positions (RIGHT SIDE ONLY - 1:2 split layout)
+function getGridPositions(numApps)
+    -- LEFT SIDE = 1/3 of screen (empty)
+    -- RIGHT SIDE = 2/3 of screen (for 6 apps in 3 rows x 2 columns)
+    
+    local leftSideWidth = math.floor(DISPLAY_WIDTH / 3)  -- 426 pixels (left empty)
+    local rightSideLeft = leftSideWidth  -- Start of right side: 426
+    local rightSideWidth = DISPLAY_WIDTH - leftSideWidth  -- Right side width: 854 pixels
+    
+    -- Right side divided into 2 columns
+    local columnWidth = math.floor(rightSideWidth / 2)  -- 427 pixels per column
+    
+    -- Right side divided into 3 rows
+    local rowHeight = math.floor(DISPLAY_HEIGHT / 3)  -- 240 pixels per row
+    
+    -- Calculate column positions on the right side
+    local col1Left = rightSideLeft  -- 426
+    local col1Right = col1Left + columnWidth  -- 853
+    local col2Left = col1Right  -- 853
+    local col2Right = DISPLAY_WIDTH  -- 1280
+    
+    -- Calculate row positions
+    local row1Top = 0
+    local row1Bottom = rowHeight  -- 240
+    local row2Top = rowHeight  -- 240
+    local row2Bottom = rowHeight * 2  -- 480
+    local row3Top = rowHeight * 2  -- 480
+    local row3Bottom = DISPLAY_HEIGHT  -- 720
+    
+    -- Positions with status bar protection for Row 1
+    return {
+        -- Row 1 (dengan status bar protection)
+        {name="R1-Left",  left=col1Left, top=STATUS_BAR_HEIGHT, right=col1Right, bottom=row1Bottom},
+        {name="R1-Right", left=col2Left, top=STATUS_BAR_HEIGHT, right=col2Right, bottom=row1Bottom},
+        
+        -- Row 2 (normal)
+        {name="R2-Left",  left=col1Left, top=row2Top, right=col1Right, bottom=row2Bottom},
+        {name="R2-Right", left=col2Left, top=row2Top, right=col2Right, bottom=row2Bottom},
+        
+        -- Row 3 (normal)
+        {name="R3-Left",  left=col1Left, top=row3Top, right=col1Right, bottom=row3Bottom},
+        {name="R3-Right", left=col2Left, top=row3Top, right=col2Right, bottom=row3Bottom},
+    }
+end
+
+-- Show grid layout visualization
+function showGridLayout()
+    print()
+    print("═══════════════════════════════════")
+    print("  GRID LAYOUT VISUALIZATION")
+    print("  Right Side Wide (1:2 Split)")
+    print("═══════════════════════════════════")
+    print()
+    print("Screen Detected: " .. DISPLAY_WIDTH .. "x" .. DISPLAY_HEIGHT)
+    print("Orientation: " .. CURRENT_ORIENTATION:upper())
+    print("Layout Mode: Right Side Wide (1:3 Split)")
+    print()
+    
+    local grid_positions = getGridPositions(#packages)
+    local numApps = math.min(6, #packages)
+    
+    print("═══════════════════════════════════════════════════════")
+    print("║              LEFT SIDE               ║  RIGHT SIDE   ║")
+    print("║             (KOSONG)                 ║   (6 APPS)    ║")
+    print("║            1/3 WIDTH                 ║  2/3 WIDTH    ║")
+    print("║══════════════════════════════════════╬═══════╦═══════╣")
+    print("║                                      ║ App 1 ║ App 2 ║ <- Status Bar Protected")
+    print("║                                      ║  (L)  ║  (R)  ║")
+    print("║             (EMPTY)                  ╠═══════╬═══════╣")
+    print("║                                      ║ App 3 ║ App 4 ║")
+    print("║         Layar Kosong                 ║  (L)  ║  (R)  ║")
+    print("║        untuk konten                  ╠═══════╬═══════╣")
+    print("║           lainnya                    ║ App 5 ║ App 6 ║")
+    print("║                                      ║  (L)  ║  (R)  ║")
+    print("═══════════════════════════════════════════════════════")
+    print()
+    print("Grid Positions (Right Side Only):")
+    for i = 1, math.min(6, numApps) do
+        local pos = grid_positions[i]
+        local status_note = ""
+        if i <= 2 then
+            status_note = " <- Status Bar Protected"
+        end
+        print(string.format("%d. %s: (%d,%d) -> (%d,%d)%s", 
+            i, pos.name, pos.left, pos.top, pos.right, pos.bottom, status_note))
+    end
+    print()
+end
+
+-- Launch with position
+function launchWithPosition(package, name, position, numApps)
+    print("→ Processing " .. name .. "...")
+    
+    -- Modify preferences first
+    if not modifyUGClonerPrefs(package, position, numApps) then
+        print("⚠ Could not modify preferences, continuing anyway...")
     end
     
-    -- Webhook
-    f = io.open(WEBHOOK_FILE, "w")
-    if f then
-        f:write("url=" .. webhook_config.url .. "\n")
-        f:write("interval=" .. webhook_config.interval .. "\n")
-        f:close()
+    -- Kill existing instance
+    print("→ Killing existing instance...")
+    exec("am force-stop " .. package)
+    os.execute("sleep 1")
+    
+    -- Launch app
+    print("→ Launching app...")
+    local launchCmd = string.format(
+        "am start -n %s/com.roblox.client.startup.ActivitySplash",
+        package
+    )
+    
+    local result = exec(launchCmd)
+    
+    if result:match("Error") or result:match("does not exist") then
+        print("✗ Launch failed!")
+        print("   Trying alternative activity...")
+        
+        -- Try alternative activity
+        launchCmd = string.format(
+            "monkey -p %s -c android.intent.category.LAUNCHER 1",
+            package
+        )
+        result = exec(launchCmd)
+    end
+    
+    os.execute("sleep 2")
+    
+    -- Get task ID
+    local taskResult = exec("dumpsys activity activities | grep -A 3 '" .. package .. "' | grep 'TaskRecord'")
+    local taskId = taskResult:match("#(%d+)")
+    
+    if taskId then
+        print("→ App running in task #" .. taskId)
+        active_tasks[package] = taskId
+        
+        -- Ensure window bounds are applied via WM commands (backup method)
+        local grid_positions = getGridPositions(numApps)
+        local pos = grid_positions[position]
+        
+        if pos then
+            print("→ Applying window bounds via WM...")
+            local wmCmd = string.format(
+                "wm task set-bounds %s %d %d %d %d",
+                taskId, pos.left, pos.top, pos.right, pos.bottom
+            )
+            exec(wmCmd)
+            print("✓ Window bounds applied!")
+        end
+    else
+        print("⚠ Could not determine task ID")
+    end
+    
+    print("✓ Posisi RT Left: (" .. position .. ")")
+end
+
+-- Modify UG Cloner XML preferences
+function modifyUGClonerPrefs(package, position, numApps)
+    local grid_positions = getGridPositions(numApps)
+    local pos = grid_positions[position]
+    
+    if not pos then
+        print("✗ Invalid position!")
+        return false
+    end
+    
+    -- Detect clone identifier from package name
+    local cloneId = package:match("clien([%w]+)$") or "z1"
+    local prefFile = string.format(
+        "/data/data/%s/shared_prefs/com.roblox.clien%s_preferences.xml",
+        package, cloneId
+    )
+    
+    print("→ Modifying preferences for position: " .. pos.name)
+    print("   Package: " .. package)
+    print("   Clone ID: " .. cloneId)
+    print("   Pref file: " .. prefFile)
+    
+    -- Check if file exists
+    local checkCmd = string.format("test -f %s && echo 'EXISTS' || echo 'NOT_FOUND'", prefFile)
+    local fileCheck = exec(checkCmd)
+    
+    if not fileCheck:match("EXISTS") then
+        print("✗ Preferences file not found!")
+        print("   Trying to find correct file...")
+        
+        -- Try to find the actual preferences file
+        local findCmd = string.format("ls /data/data/%s/shared_prefs/*.xml 2>/dev/null | grep -i pref", package)
+        local foundFiles = exec(findCmd)
+        
+        if foundFiles and foundFiles ~= "" then
+            print("   Found files:")
+            for file in foundFiles:gmatch("[^\n]+") do
+                print("     • " .. file)
+            end
+            -- Use the first file that contains "preferences"
+            prefFile = foundFiles:match("([^\n]+_preferences%.xml)")
+            if not prefFile then
+                prefFile = foundFiles:match("([^\n]+)") -- fallback to first file
+            end
+            print("   Using: " .. prefFile)
+        else
+            print("✗ Could not find any preferences file!")
+            return false
+        end
+    else
+        print("✓ Preferences file found!")
+    end
+    
+    -- Modify the XML values
+    print("→ Setting window bounds: (" .. pos.left .. "," .. pos.top .. ") - (" .. pos.right .. "," .. pos.bottom .. ")")
+    
+    local commands = {
+        string.format("sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_left\\\" value=\\\"%d\\\"/' '%s'", pos.left, prefFile),
+        string.format("sed -i 's/app_cloner_current_window_top\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_top\\\" value=\\\"%d\\\"/' '%s'", pos.top, prefFile),
+        string.format("sed -i 's/app_cloner_current_window_right\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_right\\\" value=\\\"%d\\\"/' '%s'", pos.right, prefFile),
+        string.format("sed -i 's/app_cloner_current_window_bottom\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_bottom\\\" value=\\\"%d\\\"/' '%s'", pos.bottom, prefFile),
+    }
+    
+    for _, cmd in ipairs(commands) do
+        exec(cmd)
+    end
+    
+    -- Verify modifications
+    local verifyCmd = string.format("grep -E 'app_cloner_current_window_(left|top|right|bottom)' '%s'", prefFile)
+    local result = exec(verifyCmd)
+    
+    if result and result:match(tostring(pos.left)) then
+        print("✓ Preferences successfully modified!")
+        return true
+    else
+        print("⚠ Warning: Could not verify modifications")
+        return true -- Continue anyway
     end
 end
 
-function load_data()
-    -- Load Packages
-    local f = io.open(PACKAGE_FILE, "r")
-    if f then
+-- Save packages to file
+function savePackages()
+    local file = io.open(PACKAGE_FILE, "w")
+    if file then
+        for _, pkg in ipairs(packages) do
+            file:write(pkg.name .. "|" .. pkg.package .. "\n")
+        end
+        file:close()
+        return true
+    end
+    return false
+end
+
+-- Load packages from file
+function loadPackages()
+    local file = io.open(PACKAGE_FILE, "r")
+    if file then
         packages = {}
-        for line in f:lines() do
-            local parts = split(line, "|")
-            if #parts >= 2 then
-                table.insert(packages, {name=parts[1], package=parts[2], ps_link=parts[3] or ""})
+        for line in file:lines() do
+            local name, package = line:match("(.+)|(.+)")
+            if name and package then
+                table.insert(packages, {name = name, package = package})
             end
         end
-        f:close()
+        file:close()
     end
-    
-    -- Load Config
-    f = io.open(CONFIG_FILE, "r")
-    if f then
-        for line in f:lines() do
-            local k, v = line:match("(.-)=(.+)")
-            if k == "delay_launch" then config.delay_launch = tonumber(v) end
-            if k == "clear_cache_interval" then config.clear_cache_interval = tonumber(v) end
-            if k == "clear_cache_enabled" then config.clear_cache_enabled = (v == "true") end
-            if k == "rejoin_interval" then config.rejoin_interval = tonumber(v) end
-        end
-        f:close()
-    end
-    
-    -- Load Webhook
-    f = io.open(WEBHOOK_FILE, "r")
-    if f then
-        for line in f:lines() do
-            local k, v = line:match("(.-)=(.+)")
-            if k == "url" then webhook_config.url = v end
-            if k == "interval" then webhook_config.interval = tonumber(v) end
-        end
-        f:close()
-    end
-    get_device_name()
 end
 
--- ==========================================
--- LOGIC: GRID & SYSTEM
--- ==========================================
-
-function get_grid_pos(index)
-    local idx = (index - 1) % 6 -- 0 to 5
-    local w = math.floor(DISPLAY_WIDTH / 2)
-    local h = math.floor(DISPLAY_HEIGHT / 3)
+-- Auto-detect Roblox packages
+function autoDetectRoblox()
+    print()
+    print("═══════════════════════════")
+    print("  AUTO-DETECT ROBLOX APPS")
+    print("═══════════════════════════")
+    print()
     
-    local col = idx % 2 -- 0 or 1
-    local row = math.floor(idx / 2) -- 0, 1, or 2
+    print("→ Scanning for Roblox packages...")
+    local result = exec("pm list packages | grep 'roblox'")
     
-    return {
-        left = col * w,
-        top = row * h,
-        right = (col * w) + w,
-        bottom = (row * h) + h
-    }
-end
-
-function modify_xml(package, index)
-    local pos = get_grid_pos(index)
-    local pref_file = exec("ls /data/data/" .. package .. "/shared_prefs/*preferences.xml 2>/dev/null | head -n 1")
-    
-    if not pref_file or pref_file == "" then return false end
-    
-    -- Use specific values to avoid regex complexity issues in minimal environments
-    local cmds = {
-        "sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_left\\\" value=\\\""..pos.left.."\\\"/' " .. pref_file,
-        "sed -i 's/app_cloner_current_window_top\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_top\\\" value=\\\""..pos.top.."\\\"/' " .. pref_file,
-        "sed -i 's/app_cloner_current_window_right\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_right\\\" value=\\\""..pos.right.."\\\"/' " .. pref_file,
-        "sed -i 's/app_cloner_current_window_bottom\\\" value=\\\"[0-9]*\\\"/app_cloner_current_window_bottom\\\" value=\\\""..pos.bottom.."\\\"/' " .. pref_file
-    }
-    for _, cmd in ipairs(cmds) do exec(cmd) end
-    return true
-end
-
-function get_ram_usage(package)
-    local pid = exec("pidof " .. package)
-    if not pid or pid == "" then return "0MB" end
-    local rss = exec("ps -o rss -p " .. pid .. " | tail -n 1")
-    if rss and tonumber(rss) then return math.floor(tonumber(rss) / 1024) .. "MB" end
-    return "?MB"
-end
-
--- ==========================================
--- WEBHOOK
--- ==========================================
-
-function send_webhook()
-    if webhook_config.url == "" then return end
-    
-    local fields = {}
-    local online_count, offline_count = 0, 0
-    
-    for i, pkg in ipairs(packages) do
-        local st = app_states[pkg.package]
-        local is_online = (st and st.status == "ONLINE")
-        if is_online then online_count = online_count + 1 else offline_count = offline_count + 1 end
-        
-        local icon = is_online and "🟢" or "🔴"
-        local ram = is_online and get_ram_usage(pkg.package) or "-"
-        local time_online = "-"
-        if is_online and st.online_start then
-             local diff = os.time() - st.online_start
-             local h = math.floor(diff/3600)
-             local m = math.floor((diff%3600)/60)
-             time_online = string.format("%02dh %02dm", h, m)
-        end
-        
-        local desc_val = is_online and 
-            string.format("⏱️ %s | 💾 %s", time_online, ram) or 
-            "Offline"
-            
-        table.insert(fields, string.format([[{"name": "%s **%s**", "value": "`%s`", "inline": true}]], icon, pkg.name, desc_val))
-    end
-    
-    local json = string.format([[
-    {
-        "username": "ZEEN TOOLS",
-        "avatar_url": "https://i.imgur.com/4M34hi2.png",
-        "embeds": [{
-            "title": "ZEEN MONITORING STATUS",
-            "color": 3066993,
-            "fields": [
-                { "name": "Device", "value": "%s", "inline": true },
-                { "name": "Status", "value": "🟢 On: %d | 🔴 Off: %d | 🤖 Tot: %d", "inline": false },
-                %s
-            ],
-            "footer": { "text": "ZEEN TOOLS | %s" }
-        }]
-    }
-    ]], config.device_name, online_count, offline_count, #packages, table.concat(fields, ","), os.date("%H:%M %d-%b-%Y"))
-    
-    local f = io.open("/data/data/com.termux/files/home/.zeen_pl.json", "w")
-    f:write(json)
-    f:close()
-    exec("curl -s -H \"Content-Type: application/json\" -d @/data/data/com.termux/files/home/.zeen_pl.json \"" .. webhook_config.url .. "\" > /dev/null")
-end
-
--- ==========================================
--- MONITORING (NO FLICKER)
--- ==========================================
-
-function start_monitoring()
-    if #packages == 0 then
-        print(C_RED .. "✗ No packages configured!" .. C_RESET)
-        sleep(2)
+    if not result or result == "" then
+        print("✗ Tidak ada package Roblox ditemukan!")
+        print()
+        io.write("Tekan Enter untuk kembali...")
+        io.read()
         return
     end
-
-    -- Init States
-    for _, pkg in ipairs(packages) do
-        app_states[pkg.package] = { 
-            status = "RESETTING", 
-            last_update = os.time(), 
-            online_start = nil 
-        }
+    
+    local detected = {}
+    for line in result:gmatch("[^\r\n]+") do
+        local pkg = line:match("package:(.+)")
+        if pkg then
+            table.insert(detected, pkg)
+        end
     end
     
-    print(C_CLEAR) -- Clear ONLY ONCE at start
-    io.write(C_HIDE) -- Hide cursor
-    
-    local running = true
-    while running do
-        local now = os.time()
-        
-        -- Auto Clear Cache Global Check
-        if config.clear_cache_enabled and (now - last_global_cache_clean) > (config.clear_cache_interval * 60) then
-            last_global_cache_clean = now
-            -- We don't block here, individual app logic handles specific cleaning
-        end
-
-        -- PRINT UI (Overwriting from top)
-        io.write(C_HOME) 
-        print(C_GREEN .. [[
-███████╗███████╗███████╗███╗   ██╗
-╚══███╔╝██╔════╝██╔════╝████╗  ██║
-  ███╔╝ █████╗  █████╗  ██╔██╗ ██║
- ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║
-███████╗███████╗███████╗██║ ╚████║
-╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝
-        ZEEN TOOLS v1.0.0
-]] .. C_RESET)
-        
-        print(C_CYAN .. "  Dev: " .. config.device_name .. C_RESET)
-        print(C_WHITE .. "  Status: " .. (config.clear_cache_enabled and "Auto-Clean ON" or "Auto-Clean OFF") .. " | Delay: " .. config.delay_launch .. "s" .. C_RESET)
+    if #detected == 0 then
+        print("✗ Tidak ada package Roblox ditemukan!")
         print()
-        
-        -- Table Header
-        print(string.format(C_BOLD .. "  %-3s %-20s %-12s %-8s %-10s" .. C_RESET, "NO", "NAME", "STATUS", "RAM", "UPTIME"))
-        print(C_WHITE .. "  ────────────────────────────────────────────────────────────" .. C_RESET)
-        
+        io.write("Tekan Enter untuk kembali...")
+        io.read()
+        return
+    end
+    
+    print("✓ Ditemukan " .. #detected .. " package Roblox:")
+    print()
+    
+    for i, pkg in ipairs(detected) do
+        print(i .. ". " .. pkg)
+    end
+    
+    print()
+    print("Pilihan:")
+    print("1. Tambah semua package")
+    print("2. Pilih package secara manual")
+    print("0. Batal")
+    print()
+    io.write("Pilihan: ")
+    io.flush()
+    local choice = io.read()
+    
+    if choice == "1" then
+        packages = {}
+        for i, pkg in ipairs(detected) do
+            table.insert(packages, {
+                name = "Roblox Client" .. (i > 1 and " " .. i or ""),
+                package = pkg
+            })
+        end
+        savePackages()
+        print()
+        print("✓ Berhasil menambahkan " .. #packages .. " package!")
+    elseif choice == "2" then
+        packages = {}
+        for i, pkg in ipairs(detected) do
+            print()
+            print("[" .. i .. "/" .. #detected .. "] " .. pkg)
+            io.write("Tambahkan package ini? (y/n): ")
+            io.flush()
+            local add = io.read()
+            if add and (add:lower() == "y" or add:lower() == "yes") then
+                io.write("Nama untuk package ini: ")
+                io.flush()
+                local name = io.read()
+                if name and name ~= "" then
+                    table.insert(packages, {name = name, package = pkg})
+                    print("✓ Ditambahkan!")
+                end
+            end
+        end
+        savePackages()
+        print()
+        print("✓ Berhasil menambahkan " .. #packages .. " package!")
+    else
+        print("Dibatalkan.")
+    end
+end
+
+-- Add package manually
+function addPackage()
+    print()
+    print("═══════════════════════════")
+    print("  TAMBAH PACKAGE MANUAL")
+    print("═══════════════════════════")
+    print()
+    io.write("Nama: ")
+    io.flush()
+    local name = io.read()
+    io.write("Package: ")
+    io.flush()
+    local package = io.read()
+    
+    if name and package and name ~= "" and package ~= "" then
+        table.insert(packages, {name = name, package = package})
+        savePackages()
+        print()
+        print("✓ Package berhasil ditambahkan!")
+    else
+        print()
+        print("✗ Input tidak valid!")
+    end
+end
+
+-- List all packages
+function listPackages()
+    print()
+    print("═══════════════════════════")
+    print("  DAFTAR PACKAGES")
+    print("═══════════════════════════")
+    print()
+    
+    if #packages == 0 then
+        print("(Belum ada package)")
+    else
         for i, pkg in ipairs(packages) do
-            local st = app_states[pkg.package]
-            local pkg_name = pkg.package
-            
-            -- === STATE MACHINE ===
-            if st.status == "RESETTING" then
-                exec("am force-stop " .. pkg_name)
-                st.status = "BOOSTING"
-                st.last_update = now
-                st.online_start = nil
-                
-            elseif st.status == "BOOSTING" then
-                -- SAFE CLEAR: ONLY DELETE CACHE FOLDER
-                exec("rm -rf /data/data/" .. pkg_name .. "/cache/*")
-                exec("rm -rf /data/data/" .. pkg_name .. "/code_cache/*")
-                -- NEVER USE 'pm clear' here
-                st.status = "OPTIMIZED"
-                
-            elseif st.status == "OPTIMIZED" then
-                modify_xml(pkg_name, i)
-                st.status = "READY"
-                
-            elseif st.status == "READY" then
-                if pkg.ps_link and pkg.ps_link ~= "" then
-                    exec("am start -a android.intent.action.VIEW -d \"" .. pkg.ps_link .. "\" " .. pkg_name)
-                else
-                    exec("am start " .. pkg_name)
-                end
-                
-                -- Display Countdown without blocking UI totally?
-                -- For simple Lua, we just wait.
-                -- To update status while waiting, we would need coroutines, 
-                -- but here we just update status text next loop.
-                if config.delay_launch > 0 and (now - st.last_update) < config.delay_launch then
-                   -- Still waiting
-                else
-                   st.status = "LAUNCHED"
-                   st.last_update = now
-                   sleep(config.delay_launch) -- Use configured delay
-                end
-                
-            elseif st.status == "LAUNCHED" then
-                local pid = exec("pidof " .. pkg_name)
-                if pid and pid ~= "" then
-                    if (now - st.last_update) > 5 then
-                        st.status = "ONLINE"
-                        st.online_start = now
-                    end
-                elseif (now - st.last_update) > 20 then
-                    st.status = "RETRYING"
-                end
-                
-            elseif st.status == "ONLINE" then
-                local pid = exec("pidof " .. pkg_name)
-                if not pid or pid == "" then
-                    st.status = "RETRYING"
-                else
-                    if config.rejoin_interval > 0 and st.online_start then
-                         if (now - st.online_start) > (config.rejoin_interval * 3600) then
-                             st.status = "RESETTING"
-                         end
-                    end
-                end
-            elseif st.status == "RETRYING" then
-                st.status = "RESETTING"
-            end
-            
-            -- === RENDER ROW ===
-            local s_color = C_WHITE
-            if st.status == "ONLINE" then s_color = C_GREEN
-            elseif st.status == "RESETTING" or st.status == "RETRYING" then s_color = C_RED
-            elseif st.status == "LAUNCHED" then s_color = C_YELLOW
-            else s_color = C_BLUE end
-            
-            local ram = (st.status == "ONLINE") and get_ram_usage(pkg_name) or "-"
-            local uptime = "-"
-            if st.status == "ONLINE" and st.online_start then
-                 local diff = now - st.online_start
-                 local m = math.floor(diff/60)
-                 if m > 60 then uptime = math.floor(m/60).."h" else uptime = m.."m" end
-            end
-            
-            -- Truncate name if too long
-            local dname = pkg.name
-            if #dname > 18 then dname = string.sub(dname, 1, 15) .. "..." end
-            
-            print(string.format("  %-3d %-20s %s%-12s%s %-8s %-10s", 
-                i, dname, s_color, st.status, C_RESET, ram, uptime))
+            print(i .. ". " .. pkg.name)
+            print("   " .. pkg.package)
+            print()
         end
-        
-        -- Webhook Check
-        if webhook_config.interval > 0 and webhook_config.url ~= "" then
-            if (now - last_webhook_time) > webhook_config.interval then
-                last_webhook_time = now
-                send_webhook() -- Warning: this pauses loop briefly
-            end
-        end
-        
-        -- Clear trailing lines (optional cleanup)
-        print(C_WHITE .. "\n  [CTRL+C to Stop Monitoring]" .. C_RESET)
-        
-        sleep(2)
+        print("Total: " .. #packages .. " package(s)")
     end
-    io.write(C_SHOW)
+    print()
 end
 
--- ==========================================
--- SETUP WIZARD (FULL)
--- ==========================================
-
-function setup_wizard()
-    print(C_CLEAR)
-    print(C_HOME)
-    print(C_GREEN .. "════ SETUP WIZARD v1.0.0 ════" .. C_RESET)
-    print("Mari konfigurasi alat tempur Anda.\n")
+-- Remove package
+function removePackage()
+    print()
+    print("═══════════════════════════")
+    print("  HAPUS PACKAGE")
+    print("═══════════════════════════")
+    print()
     
-    -- 1. Scan Packages
-    print(C_YELLOW .. "[1/6] Scanning Packages..." .. C_RESET)
-    local res = exec("pm list packages | grep 'roblox'")
-    local found = {}
-    for line in res:gmatch("[^\r\n]+") do
-        local p = line:match("package:(.+)")
-        if p then table.insert(found, p) end
+    if #packages == 0 then
+        print("✗ Belum ada package!")
+        return
     end
     
-    if #found > 0 then
-        print("Ditemukan " .. #found .. " package Roblox.")
-        io.write("Tambahkan semua otomatis? (y/n) > ")
-        local yn = io.read()
-        if yn == "y" then
-            packages = {}
-            for idx, p in ipairs(found) do
-                table.insert(packages, {name="Akun " .. idx, package=p, ps_link=""})
-            end
-            print("✓ " .. #packages .. " package ditambahkan.")
-        end
-    else
-        print("⚠ Tidak ada package ditemukan. Anda bisa tambah manual nanti.")
-    end
+    listPackages()
     
-    -- 2. Delay
-    print(C_YELLOW .. "\n[2/6] Delay Launcher" .. C_RESET)
-    print("Waktu jeda antar buka aplikasi (detik).")
-    io.write("Input (Default 10): ")
-    local d = io.read()
-    config.delay_launch = tonumber(d) or 10
+    io.write("Nomor package yang akan dihapus (0 = batal): ")
+    io.flush()
+    local num = tonumber(io.read())
     
-    -- 3. Webhook
-    print(C_YELLOW .. "\n[3/6] Discord Webhook" .. C_RESET)
-    io.write("Masukkan URL Webhook (Enter untuk skip): ")
-    local wh = io.read()
-    webhook_config.url = wh
-    if wh ~= "" then
-        io.write("Interval notifikasi (detik, cth: 300): ")
-        local intv = io.read()
-        webhook_config.interval = tonumber(intv) or 300
-        
-        print("Testing Webhook...")
-        local json = '{"username":"ZEEN TOOLS","content":"🎉 **Setup Wizard Completed!** Webhook Connected."}'
-        local f = io.open("/data/data/com.termux/files/home/.ztest.json","w"); f:write(json); f:close()
-        exec("curl -H \"Content-Type: application/json\" -d @/data/data/com.termux/files/home/.ztest.json \""..wh.."\"")
-    end
-    
-    -- 4. Auto Clear Cache
-    print(C_YELLOW .. "\n[4/6] Auto Clear Cache" .. C_RESET)
-    io.write("Aktifkan hapus cache otomatis? (y/n): ")
-    local acc = io.read()
-    if acc == "y" then
-        config.clear_cache_enabled = true
-        io.write("Interval hapus cache (menit, Default 30): ")
-        config.clear_cache_interval = tonumber(io.read()) or 30
-    else
-        config.clear_cache_enabled = false
-    end
-    
-    -- 5. Auto Rejoin
-    print(C_YELLOW .. "\n[5/6] Auto Rejoin" .. C_RESET)
-    print("Reset aplikasi setelah berjalan sekian jam.")
-    io.write("Interval Jam (0 = matikan fitur ini): ")
-    config.rejoin_interval = tonumber(io.read()) or 0
-    
-    save_data()
-    print(C_GREEN .. "\n✓ Setup Selesai! Data tersimpan." .. C_RESET)
-    sleep(2)
-end
-
--- ==========================================
--- EDIT CONFIG MENU
--- ==========================================
-
-function menu_edit()
-    while true do
-        print(C_CLEAR .. C_HOME)
-        print("══ EDIT CONFIG ══")
-        print("1. Manage Packages (Add/Del)")
-        print("2. Manage Link PS")
-        print("3. Delay Launch ("..config.delay_launch.."s)")
-        print("4. Webhook ("..(webhook_config.url ~= "" and "ON" or "OFF")..")")
-        print("5. Clear Cache ("..(config.clear_cache_enabled and "ON" or "OFF")..")")
-        print("6. Rejoin Interval ("..config.rejoin_interval.."h)")
-        print("0. Back")
-        io.write("Choice > ")
-        local c = io.read()
-        
-        if c == "0" then break
-        elseif c == "1" then
-            print("\n1. Auto Detect & Add All")
-            print("2. Manual Add")
-            print("3. Delete All")
-            local sc = io.read()
-            if sc == "1" then
-                local res = exec("pm list packages | grep 'roblox'")
-                local cnt = 0
-                for line in res:gmatch("[^\r\n]+") do
-                   local p = line:match("package:(.+)")
-                   local exists = false
-                   for _,kp in ipairs(packages) do if kp.package == p then exists=true end end
-                   if not exists then
-                       table.insert(packages, {name="Roblox "..#packages+1, package=p, ps_link=""})
-                       cnt = cnt+1
-                   end
-                end
-                print("Added "..cnt.." new packages.")
-                save_data()
-                sleep(1)
-            elseif sc == "3" then
-                packages = {}
-                save_data()
-                print("All deleted.")
-                sleep(1)
-            end
-        elseif c == "2" then
-            print("\n1. Set All to one Link")
-            print("2. Set per App")
-            print("3. Delete All Links")
-            local sc = io.read()
-            if sc == "1" then
-                io.write("Link PS: ")
-                local l = io.read()
-                for _,p in ipairs(packages) do p.ps_link = l end
-                save_data()
-            elseif sc == "3" then
-                for _,p in ipairs(packages) do p.ps_link = "" end
-                save_data()
-            end
-        elseif c == "3" then
-            io.write("Delay (seconds): ")
-            config.delay_launch = tonumber(io.read()) or 10
-            save_data()
-        elseif c == "4" then
-            io.write("Webhook URL: ")
-            webhook_config.url = io.read()
-            io.write("Interval (seconds): ")
-            webhook_config.interval = tonumber(io.read()) or 300
-            save_data()
-        elseif c == "5" then
-            config.clear_cache_enabled = not config.clear_cache_enabled
-            if config.clear_cache_enabled then
-                io.write("Interval (minutes): ")
-                config.clear_cache_interval = tonumber(io.read()) or 30
-            end
-            save_data()
-        elseif c == "6" then
-            io.write("Rejoin Hours (0=off): ")
-            config.rejoin_interval = tonumber(io.read()) or 0
-            save_data()
-        end
-    end
-end
-
--- ==========================================
--- MAIN
--- ==========================================
-
-function main()
-    load_data()
-    -- Set unbuffered input/output
-    io.stdout:setvbuf("no")
-    
-    while true do
-        print(C_CLEAR .. C_HOME)
-        print(C_GREEN .. [[
-███████╗███████╗███████╗███╗   ██╗
-╚══███╔╝██╔════╝██╔════╝████╗  ██║
-  ███╔╝ █████╗  █████╗  ██╔██╗ ██║
- ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║
-███████╗███████╗███████╗██║ ╚████║
-╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝
-        ZEEN TOOLS v1.0.0
-]] .. C_RESET)
-        print("  1. Start Monitoring " .. C_GREEN .. "[RUN]" .. C_RESET)
-        print("  2. First Run Setup (Wizard)")
-        print("  3. Edit Config")
-        print("  0. Exit")
+    if num and num > 0 and num <= #packages then
+        local removed = table.remove(packages, num)
+        savePackages()
         print()
-        io.write("  Choice > ")
-        local c = io.read()
+        print("✓ Package '" .. removed.name .. "' berhasil dihapus!")
+    else
+        print()
+        print("Dibatalkan.")
+    end
+end
+
+-- Clear all packages
+function clearAllPackages()
+    print()
+    print("═══════════════════════════")
+    print("  HAPUS SEMUA PACKAGES")
+    print("═══════════════════════════")
+    print()
+    io.write("⚠ Yakin ingin menghapus semua package? (y/n): ")
+    io.flush()
+    local confirm = io.read()
+    
+    if confirm and (confirm:lower() == "y" or confirm:lower() == "yes") then
+        packages = {}
+        savePackages()
+        print()
+        print("✓ Semua package berhasil dihapus!")
+    else
+        print()
+        print("Dibatalkan.")
+    end
+end
+
+-- Launch auto grid
+function launchAutoGrid()
+    print()
+    print("═══════════════════════════════════")
+    print("  AUTO GRID LAUNCH")
+    print("  Right Side Wide (1:2 Split)")
+    print("═══════════════════════════════════")
+    print()
+    
+    if #packages == 0 then
+        print("✗ Belum ada package!")
+        print()
+        io.write("Tekan Enter untuk kembali...")
+        io.read()
+        return
+    end
+    
+    local numApps = #packages
+    local maxApps = math.min(6, numApps)  -- Maximum 6 apps on right side
+    local layoutType = "right_3x2"
+    
+    print("Info:")
+    print("• Menggunakan 75% lebar layar (Kanan)")
+    print("• Layout: " .. layoutType .. " (3 baris x 2 kolom)")
+    print("• Layar kiri kosong untuk konten lain")
+    print("• Baris 1 dilindungi dari status bar")
+    print()
+    
+    if numApps > 6 then
+        print("⚠ Hanya 6 app pertama yang akan di-launch")
+        print("  (layout maksimal: 6 apps)")
+        print()
+    end
+    
+    print("Packages yang akan di-launch:")
+    for i = 1, maxApps do
+        print(i .. ". " .. packages[i].name)
+    end
+    print()
+    
+    showGridLayout()
+    
+    print("═══════════════════════════════════")
+    print()
+    io.write("Lanjutkan launch? (y/n): ")
+    io.flush()
+    local confirm = io.read()
+    
+    if not confirm or not (confirm:lower() == "y" or confirm:lower() == "yes") then
+        print("Dibatalkan.")
+        return
+    end
+    
+    print()
+    print("→ Starting auto-grid launch...")
+    print("   This may take a while...")
+    print()
+    
+    for i = 1, maxApps do
+        local pkg = packages[i]
+        print()
+        print("═══ [ " .. i .. "/" .. maxApps .. " ] ═══")
         
-        if c == "1" then start_monitoring()
-        elseif c == "2" then setup_wizard()
-        elseif c == "3" then menu_edit()
-        elseif c == "0" then 
-            print("Bye!"); break 
+        launchWithPosition(pkg.package, pkg.name, i, numApps)
+        
+        if i < maxApps then
+            print()
+            print("→ Waiting before next launch...")
+            os.execute("sleep 2")
+        end
+    end
+    
+    print()
+    print("═══════════════════════════════════")
+    print("✓ AUTO GRID LAUNCH COMPLETE!")
+    print("═══════════════════════════════════")
+    print()
+    print("All apps should now be positioned in")
+    print("a " .. layoutType .. " grid layout on the right side.")
+    print("Left side (1/3 of screen) remains empty.")
+end
+
+-- Launch single app
+function launchSingleApp()
+    print()
+    print("═══════════════════════════")
+    print("  LAUNCH SINGLE APP")
+    print("═══════════════════════════")
+    print()
+    
+    if #packages == 0 then
+        print("✗ Belum ada package!")
+        return
+    end
+    
+    print("Pilih App:")
+    for i, pkg in ipairs(packages) do
+        print(i .. ". " .. pkg.name)
+    end
+    print()
+    io.write("Pilihan (0 = batal): ")
+    io.flush()
+    local choice = tonumber(io.read())
+    
+    if not choice or choice == 0 or not packages[choice] then
+        print("Dibatalkan.")
+        return
+    end
+    
+    local pkg = packages[choice]
+    
+    print()
+    showGridLayout()
+    
+    io.write("Posisi grid (1-6): ")
+    io.flush()
+    local pos = tonumber(io.read())
+    
+    if pos and pos >= 1 and pos <= 6 then
+        print()
+        launchWithPosition(pkg.package, pkg.name, pos, #packages)
+    else
+        print("✗ Posisi tidak valid!")
+    end
+end
+
+-- Move/reposition active app
+function moveActiveApp()
+    print()
+    print("═══════════════════════════")
+    print("  MOVE/REPOSITION APP")
+    print("═══════════════════════════")
+    print()
+    
+    if #packages == 0 then
+        print("✗ Belum ada package!")
+        return
+    end
+    
+    print("Pilih App untuk dipindah:")
+    for i, pkg in ipairs(packages) do
+        local status = active_tasks[pkg.package] and " [ACTIVE]" or ""
+        print(i .. ". " .. pkg.name .. status)
+    end
+    print()
+    io.write("Pilihan (0 = batal): ")
+    io.flush()
+    local choice = tonumber(io.read())
+    
+    if not choice or choice == 0 or not packages[choice] then
+        print("Dibatalkan.")
+        return
+    end
+    
+    local pkg = packages[choice]
+    
+    print()
+    showGridLayout()
+    
+    io.write("Posisi baru (1-6): ")
+    io.flush()
+    local pos = tonumber(io.read())
+    
+    if pos and pos >= 1 and pos <= 6 then
+        print()
+        print("→ Repositioning to position " .. pos .. "...")
+        launchWithPosition(pkg.package, pkg.name, pos, #packages)
+    else
+        print("✗ Posisi tidak valid!")
+    end
+end
+
+-- Show active tasks
+function showActiveTasks()
+    print()
+    print("═══════════════════════════")
+    print("  ACTIVE TASKS")
+    print("═══════════════════════════")
+    print()
+    
+    if next(active_tasks) == nil then
+        print("(Belum ada task yang active)")
+    else
+        local count = 0
+        for pkg, taskId in pairs(active_tasks) do
+            local name = pkg
+            for _, p in ipairs(packages) do
+                if p.package == pkg then
+                    name = p.name
+                    break
+                end
+            end
+            count = count + 1
+            print(count .. ". " .. name)
+            print("   Package: " .. pkg)
+            print("   Task ID: " .. taskId)
+            print()
+        end
+        print("Total: " .. count .. " active task(s)")
+    end
+    print()
+end
+
+-- Main menu
+function showMenu()
+    print()
+    print("═══════════════════════════")
+    print("  MAIN MENU")
+    print("═══════════════════════════")
+    print()
+    print("🚀 LAUNCH & POSITION:")
+    print("  1. Auto Grid Launch (All)")
+    print("  2. Launch Single App")
+    print("  3. Move/Reposition App")
+    print()
+    print("📊 INFO & VIEW:")
+    print("  4. Show Grid Layout")
+    print("  5. Show Active Tasks")
+    print("  6. 🔄 Re-detect Display")
+    print()
+    print("📦 PACKAGE MANAGEMENT:")
+    print("  7. 🔍 Auto-Detect Roblox")
+    print("  8. Add Package Manual")
+    print("  9. List Packages")
+    print("  10. Remove Package")
+    print("  11. Clear All Packages")
+    print()
+    print("  0. Exit")
+    print()
+    print("═══════════════════════════")
+    io.write("Pilihan: ")
+    io.flush()
+    return io.read()
+end
+
+-- Main program loop
+function main()
+    -- Disable buffering for immediate output
+    io.stdout:setvbuf("no")
+    io.stdin:setvbuf("no")
+    
+    -- Detect display configuration
+    print("═══════════════════════════")
+    print("  INITIALIZING...")
+    print("═══════════════════════════")
+    print()
+    detectDisplay()
+    print()
+    
+    -- Load saved packages
+    loadPackages()
+    
+    print("═══════════════════════════")
+    print("  Welcome!")
+    print("  Right Side Layout (1:2)")
+    print("═══════════════════════════")
+    print()
+    
+    if #packages > 0 then
+        print("✓ Loaded " .. #packages .. " saved package(s)")
+    else
+        print("📌 TIP: Use option 6 to auto-detect")
+        print("   all Roblox packages on your device!")
+    end
+    
+    -- Main loop
+    while true do
+        local choice = showMenu()
+        
+        if choice == "1" then
+            launchAutoGrid()
+        elseif choice == "2" then
+            launchSingleApp()
+        elseif choice == "3" then
+            moveActiveApp()
+        elseif choice == "4" then
+            showGridLayout()
+        elseif choice == "5" then
+            showActiveTasks()
+        elseif choice == "6" then
+            print()
+            print("═══════════════════════════")
+            print("  RE-DETECTING DISPLAY")
+            print("═══════════════════════════")
+            print()
+            detectDisplay()
+        elseif choice == "7" then
+            autoDetectRoblox()
+        elseif choice == "8" then
+            addPackage()
+        elseif choice == "9" then
+            listPackages()
+        elseif choice == "10" then
+            removePackage()
+        elseif choice == "11" then
+            clearAllPackages()
+        elseif choice == "0" or choice == "11" then
+            print()
+            print("═══════════════════════════")
+            print("  Terima kasih!")
+            print("  Sampai jumpa! 👋")
+            print("═══════════════════════════")
+            print()
+            break
+        else
+            print()
+            print("✗ Pilihan tidak valid!")
+            os.execute("sleep 1")
+        end
+        
+        if choice ~= "0" and choice ~= "11" then
+            print()
+            io.write("Tekan Enter untuk lanjut...")
+            io.read()
         end
     end
 end
 
+-- Run the program
 main()
-
-
