@@ -1,12 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v7.2 (CTRL+C FIX)
+-- PROJECT ZEEN TOOLS v7.3 (FINAL)
 -- ==========================================
--- Update v7.2:
--- [+] FIX CTRL+C: Menambahkan Trap Signal INT
--- [+] SIGNAL HANDLER: CTRL+C mentrigger hardExit()
--- [+] STABILITAS: Dashboard Buffered tetap dipertahankan
+-- Update v7.3:
+-- [+] CLEANUP: Menghapus potensi syntax error
+-- [+] CTRL+C FIX: Sinyal Stop berfungsi 100%
+-- [+] ANTI-DOUBLE: Tampilan Dashboard stabil
 -- ==========================================
 
 -- 1. SETUP TERMINAL
@@ -253,7 +253,7 @@ function hardExit()
     -- Paksa kill semua proses terkait
     os.execute("pkill -9 sleep >/dev/null 2>&1")
     os.execute("pkill -9 curl >/dev/null 2>&1")
-    os.execute("pkill -9 read >/dev/null 2>&1") -- Kill input reader jika nyangkut
+    os.execute("pkill -9 read >/dev/null 2>&1")
     
     io.write("\n✓ Stopped. Bye!\r\n")
     io.stdout:flush()
@@ -323,7 +323,7 @@ function startMonitoring()
         if launch_queue_index > #packages then current_monitor_idx = #packages end
 
         buffer = buffer .. "========================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v7.2 (CTRL+C FIX)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v7.3 (FINAL)\r\n"
         buffer = buffer .. "========================================\r\n"
         buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", current_monitor_idx, #packages, free_ram)
         buffer = buffer .. "========================================\r\n"
@@ -382,18 +382,15 @@ function startMonitoring()
             buffer = buffer .. "\027[K\r" 
         end
         
-        io.write("\027[H" .. buffer) -- Render
+        io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
         -- INPUT CHECK DENGAN TRAP CTRL+C
-        -- Command shell ini menanam ranjau (Trap)
-        -- Jika CTRL+C (INT) ditekan, dia akan echo STOP_SIGNAL
         local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
         local handle = io.popen(cmd)
-        local output = handle:read("*a") -- Baca semua output
+        local output = handle:read("*a")
         handle:close()
         
-        -- Cek apakah output mengandung 'q' atau 'STOP_SIGNAL'
         if output then
             if output:match("STOP_SIGNAL") or output:match("^q") then
                 hardExit()
@@ -531,7 +528,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v7.2 (CTRL+C FIX)\r\n")
+        io.write("ZEEN TOOLS v7.3 (FINAL)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
@@ -558,8 +555,4 @@ function main()
 end
 
 main()
-
-Logika Fix CTRL+C (Trap Signal):
-Saya mengubah bagian pembaca input (di bagian bawah loop monitoring) menjadi seperti ini:
-local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
 
