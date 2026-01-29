@@ -1,13 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v8.1 (ULTIMATE MERGE)
+-- PROJECT ZEEN TOOLS v8.2 (STABLE NET & UI)
 -- ==========================================
--- Update v8.1:
--- [+] MERGE: Menggabungkan Traffic Watchdog & UI Fix
--- [+] UI FIX: Free RAM di bawah, Counter Loop (1/6)
--- [+] TRAFFIC MONITOR: Deteksi Disconnect via Data
--- [+] SMART QUEUE: Restart antri satu per satu
+-- Update v8.2:
+-- [+] UI FIX: Tampilan tabel rapi & RAM di baris baru
+-- [+] NET FIX: Grace Period 90s (Anti Restart saat Loading)
+-- [+] NET FIX: Threshold 100 bytes & 5 Strike (Anti Lag Kill)
+-- [+] MONITOR FIX: Menghitung Real App Aktif
 -- ==========================================
 
 -- 1. SETUP TERMINAL TOTAL
@@ -33,19 +33,25 @@ function safe_input(prompt)
 end
 
 function clearScreen()
-    io.write("\027[H\027[2J") 
+    -- Gunakan clear bawaan OS, lebih bersih di Android 10
+    os.execute("clear") 
+end
+
+function resetCursor()
+    -- Hanya kembalikan kursor ke atas
+    io.write("\027[H")
     io.stdout:flush()
 end
 
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local WATCHDOG_INTERVAL = 2   
-local GRACE_PERIOD = 40       -- Waktu kebal awal (40s)
+local WATCHDOG_INTERVAL = 3   
+local GRACE_PERIOD = 90       -- DIPERPANJANG: 90 Detik toleransi loading awal
 local QUEUE_DELAY = 30        -- Jeda antar restart
 local STABLE_TIME = 60        
-local TRAFFIC_THRESHOLD = 1024 -- Min 1KB data
-local MAX_STRIKES = 3         -- 3x Data macet = Kill
+local TRAFFIC_THRESHOLD = 100 -- DITURUNKAN: Cukup 100 bytes (detak jantung server)
+local MAX_STRIKES = 5         -- DIPERBANYAK: 5x data macet baru kill
 
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -69,7 +75,6 @@ local device_name = "Android Device"
 -- Variabel Kontrol
 local launch_queue_index = 1    
 local next_launch_time = 0 
-local current_scan_index = 1 -- Counter Visual (1/6)
 
 -- ==========================================
 -- SYSTEM HELPERS
@@ -290,7 +295,6 @@ function cleanupAndPrepare()
     buffer = buffer .. "========================================\r\n"
     local any_reset = false
     for i, pkg in ipairs(packages) do
-        -- Init State (Gabungan v8 dan v7)
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
@@ -311,16 +315,18 @@ function cleanupAndPrepare()
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP (MERGED LOGIC)
+-- MAIN MONITOR LOOP
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
     
     launch_queue_index = 1    
     next_launch_time = os.time()
-    current_scan_index = 1 
     local next_webhook_time = os.time() + 5 
     
+    -- Clear awal
+    clearScreen()
+
     while true do
         local current_time = os.time()
         
@@ -334,6 +340,7 @@ function startMonitoring()
                 local state = app_states[pkg.package]
                 state.status = "Launched"
                 state.startTime = current_time
+                -- 90 Detik toleransi (Diperpanjang)
                 state.ignoreUntil = current_time + GRACE_PERIOD
                 state.strikes = 0
                 state.lastBytes = getNetworkBytes(state.uid)
@@ -344,18 +351,23 @@ function startMonitoring()
             end
         end
 
-        -- B. UPDATE VISUAL COUNTER (Looping)
-        current_scan_index = current_scan_index + 1
-        if current_scan_index > #packages then current_scan_index = 1 end
-
-        -- C. RENDER BUFFER
+        -- B. RENDER BUFFER (UI FIX)
         local buffer = ""
         local free_ram = getFreeRAM()
         
+        -- Hitung app yg benar-benar sudah Launched/Alive
+        local launched_count = 0
+        for _, pkg in ipairs(packages) do
+            if app_states[pkg.package].status ~= "Ready" then
+                launched_count = launched_count + 1
+            end
+        end
+
+        -- Header Rapi (Anti-Kacau)
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v8.1 (ULTIMATE)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v8.2 (STABLE NET & UI)\r\n"
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" MONITORING : %d/%d\r\n", current_scan_index, #packages)
+        buffer = buffer .. string.format(" MONITORING : %d/%d\r\n", launched_count, #packages)
         buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
         buffer = buffer .. "==============================================\r\n"
         buffer = buffer .. string.format(" %-3s %-12s %-16s %s\r\n", "NO", "NAME", "STATUS", "NET")
@@ -367,35 +379,34 @@ function startMonitoring()
             local net_text = "-"
             local force_kill = false
             
-            -- POINTER VISUAL
-            local pointer = (i == current_scan_index) and ">" or " "
-            
             if state.status == "Ready" then
                 status_text = "\027[1;36mReady\027[0m" 
             
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
-                -- 1. GRACE PERIOD (Loading)
+                -- 1. GRACE PERIOD (Loading: Kuning)
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
                     status_text = string.format("\027[1;33mLoad (%ds)\027[0m", timeLeft) 
                     state.status = "ALIVE"
-                    state.lastBytes = getNetworkBytes(state.uid)
+                    -- Update bytes diam-diam, JANGAN DIHITUNG STRIKE SAAT LOADING
+                    state.lastBytes = getNetworkBytes(state.uid) 
                     net_text = "Wait"
                 else
-                    -- 2. NORMAL MONITORING (PID + TRAFFIC)
+                    -- 2. NORMAL MONITORING
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
                         local currBytes = getNetworkBytes(state.uid)
                         local delta = currBytes - state.lastBytes
                         state.lastBytes = currBytes
                         
-                        -- Traffic Watchdog
+                        -- Traffic Watchdog (Lebih Santai)
                         if delta < TRAFFIC_THRESHOLD then
                             state.strikes = state.strikes + 1
                             net_text = string.format("\027[1;31mLOW (%d)\027[0m", state.strikes)
                             if state.strikes >= MAX_STRIKES then force_kill = true end
                         else
                             state.strikes = 0
+                            -- Hitung estimasi KB/s
                             local kbs = math.floor(delta / 1024 / WATCHDOG_INTERVAL)
                             net_text = string.format("\027[1;32m%d KB\027[0m", kbs)
                         end
@@ -433,7 +444,8 @@ function startMonitoring()
             end
             
             local shortName = pkg.name:sub(1, 12)
-            buffer = buffer .. string.format("%s[%d] %-12s %-16s %s\r\n", pointer, i, shortName, status_text, net_text)
+            -- Gunakan %-12s agar lebar nama fix, tidak menggeser kolom lain
+            buffer = buffer .. string.format(" [%d] %-12s %-16s %s\r\n", i, shortName, status_text, net_text)
         end
         
         buffer = buffer .. "==============================================\r\n"
@@ -447,6 +459,7 @@ function startMonitoring()
             buffer = buffer .. "\027[K\r" 
         end
         
+        -- RESET KURSOR (TANPA CLEAR TOTAL) AGAR TIDAK KEDIP
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
@@ -593,7 +606,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v8.1 (ULTIMATE)\r\n")
+        io.write("ZEEN TOOLS v8.2 (STABLE NET & UI)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
