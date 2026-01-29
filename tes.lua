@@ -1,22 +1,53 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.4 (FIX DISPLAY)
+-- PROJECT ZEEN TOOLS v5.5 (HARD FIX)
 -- ==========================================
--- Update v5.4:
--- [+] OBAT TAMPILAN TANGGA (stty sane)
--- [+] FIX INPUT TIDAK BISA DIPILIH
--- [+] Custom Print function (\r\n)
+-- Update v5.5:
+-- [+] MANUAL PRINT: Tidak pakai print() bawaan
+-- [+] FORCE CR (\r): Memaksa kursor ke kiri
+-- [+] INPUT FLUSH: Memperbaiki input macet
 -- ==========================================
 
--- [PENTING] PERINTAH SAKTI PERBAIKAN TERMINAL
--- Ini akan memaksa Termux kembali normal (mode cooked)
+-- 1. PAKSA TERMINAL KE MODE NORMAL SEBELUM APA-APA
 os.execute("stty sane") 
+os.execute("stty -raw echo")
 
--- Paksa output keluar seketika (mencegah macet)
+-- 2. MATIKAN BUFFERING AGAR TEKS MUNCUL LANGSUNG
 io.stdout:setvbuf("no")
 
+-- ==========================================
+-- INTI PERBAIKAN (CUSTOM PRINT)
+-- ==========================================
+-- Kita timpa fungsi print bawaan yang error
+-- Fungsi ini memaksa setiap baris diakhiri \r\n
+-- \r = Carriage Return (Geser mentok kiri)
+-- \n = New Line (Turun baris)
+
+function safe_print(str)
+    str = tostring(str or "")
+    io.write(str .. "\r\n")
+    io.stdout:flush() -- Paksa tampil ke layar
+end
+
+-- Override fungsi global
+print = safe_print
+
+function safe_input(prompt)
+    io.write(prompt)
+    io.stdout:flush() -- Pastikan teks "Pilih:" muncul dulu
+    local result = io.read() -- Baca input
+    return result
+end
+
+function clearScreen()
+    -- Gunakan clear native
+    os.execute("clear")
+end
+
+-- ==========================================
 -- KONFIGURASI SYSTEM
+-- ==========================================
 local WATCHDOG_INTERVAL = 5
 local QUEUE_DELAY = 30
 local STABLE_TIME = 60
@@ -42,32 +73,6 @@ local config = { delay = DEFAULT_DELAY }
 local webhook_conf = { url = "", interval = 300 } 
 local vip_link = ""
 local device_name = "Android Device"
-
--- ==========================================
--- FUNGSI DISPLAY AMAN (ANTI-TANGGA)
--- ==========================================
-
--- Fungsi print khusus yang memaksa baris baru + geser ke kiri
-function cprint(str)
-    str = str or ""
-    io.write(str .. "\r\n")
-    io.stdout:flush()
-end
-
--- Fungsi input yang aman
-function cinput(prompt)
-    io.write(prompt)
-    io.stdout:flush()
-    return io.read()
-end
-
-function clearScreen()
-    -- Gunakan perintah clear native linux, lebih aman daripada ANSI code
-    os.execute("clear")
-end
-
--- Override fungsi print bawaan lua agar aman
-print = cprint
 
 -- ==========================================
 -- SYSTEM HELPERS
@@ -221,7 +226,7 @@ function sendDiscordWebhook()
 end
 
 -- ==========================================
--- MONITORING LOOP (FIXED DISPLAY)
+-- MONITORING LOOP
 -- ==========================================
 function startMonitoring()
     for i, pkg in ipairs(packages) do
@@ -236,16 +241,16 @@ function startMonitoring()
     while true do
         local current_time = os.time()
         
-        -- Reset Kursor ke pojok kiri atas
+        -- Reset kursor manual
         io.write("\027[H") 
         
-        cprint("========================================")
-        cprint("     ZEEN TOOLS v5.4 (ULTIMATE)")
-        cprint("========================================")
-        cprint(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
-        if vip_link ~= "" then cprint(" VIP Link: ACTIVE (Direct Pkg)")
-        else cprint(" VIP Link: -") end
-        cprint("========================================")
+        print("========================================")
+        print("     ZEEN TOOLS v5.5 (ULTIMATE)")
+        print("========================================")
+        print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
+        if vip_link ~= "" then print(" VIP Link: ACTIVE (Direct Pkg)")
+        else print(" VIP Link: -") end
+        print("========================================")
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
@@ -282,12 +287,12 @@ function startMonitoring()
             end
             
             local shortName = pkg.name:sub(1, 15)
-            -- Print baris tabel dengan carriage return (\r)
+            -- Gunakan safe print untuk baris
             io.write(string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text))
             io.stdout:flush()
         end
         
-        cprint("========================================")
+        print("========================================")
         io.write(" CTRL+C to Stop & Exit to Shell ($)     \027[K\r\n")
         io.stdout:flush()
         
@@ -351,29 +356,29 @@ end
 function menuSettings()
     while true do
         clearScreen()
-        cprint("══ SETTINGS & EXTRAS ══")
-        cprint("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
-        cprint("2. Set Private Server Link (VIP)")
-        cprint("3. Set Discord Webhook")
-        cprint("4. Kembali")
+        print("══ SETTINGS & EXTRAS ══")
+        print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
+        print("2. Set Private Server Link (VIP)")
+        print("3. Set Discord Webhook")
+        print("4. Kembali")
         
-        local c = cinput("Pilih: ")
+        local c = safe_input("Pilih: ")
         
         if c == "1" then
-            config.delay = tonumber(cinput("Delay (detik): ")) or 10
+            config.delay = tonumber(safe_input("Delay (detik): ")) or 10
             saveAll()
         elseif c == "2" then
-            cprint("Masukkan Link VIP (Kosongkan untuk hapus):")
-            vip_link = cinput(">> ")
+            print("Masukkan Link VIP (Kosongkan untuk hapus):")
+            vip_link = safe_input(">> ")
             saveAll()
         elseif c == "3" then
-            cprint("1. Set URL")
-            cprint("2. Set Interval (Detik)")
-            local wc = cinput(">> ")
+            print("1. Set URL")
+            print("2. Set Interval (Detik)")
+            local wc = safe_input(">> ")
             if wc == "1" then 
-                webhook_conf.url = cinput("Webhook URL: ")
+                webhook_conf.url = safe_input("Webhook URL: ")
             elseif wc == "2" then 
-                webhook_conf.interval = tonumber(cinput("Interval (cth: 300): ")) or 300 
+                webhook_conf.interval = tonumber(safe_input("Interval (cth: 300): ")) or 300 
             end
             saveAll()
         elseif c == "4" then break end
@@ -382,17 +387,17 @@ end
 
 function autoDetectRoblox()
     clearScreen()
-    cprint("══ AUTO-DETECT ROBLOX ══")
+    print("══ AUTO-DETECT ROBLOX ══")
     local result = exec("pm list packages | grep 'roblox'")
     local detected = {}
     for line in result:gmatch("[^\r\n]+") do
         local pkg = line:match("package:(.+)")
         if pkg then table.insert(detected, pkg) end
     end
-    if #detected == 0 then cprint("✗ Tidak ada Roblox."); cinput("Tekan Enter..."); return end
+    if #detected == 0 then print("✗ Tidak ada Roblox."); safe_input("Tekan Enter..."); return end
     
-    cprint("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
-    if cinput("Pilihan: ") == "all" then
+    print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
+    if safe_input("Pilihan: ") == "all" then
         for _, pkg in ipairs(detected) do
             local exists = false
             for _, p in ipairs(packages) do if p.package == pkg then exists = true end end
@@ -408,8 +413,8 @@ end
 
 function launchAutoGrid()
     clearScreen()
-    cprint("══ LAUNCHING SEQUENCE ══")
-    if #packages == 0 then cprint("✗ No packages!"); cinput("Enter..."); return end
+    print("══ LAUNCHING SEQUENCE ══")
+    if #packages == 0 then print("✗ No packages!"); safe_input("Enter..."); return end
     
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
@@ -423,13 +428,13 @@ function launchAutoGrid()
         end
     end
     
-    if cinput("Start Farming? (y/n): ") ~= "y" then return end
+    if safe_input("Start Farming? (y/n): ") ~= "y" then return end
     
     app_states = {}
     local maxApps = #packages
     for i = 1, maxApps do
         local pkg = packages[i]
-        cprint("[" .. i .. "] Launching " .. pkg.name .. "...")
+        print("[" .. i .. "] Launching " .. pkg.name .. "...")
         modifyUGClonerPrefs(pkg.package, i, maxApps)
         killAndStart(pkg.package, true)
         app_states[pkg.package] = { startTime = os.time(), status = "Launched" }
@@ -440,32 +445,33 @@ function launchAutoGrid()
 end
 
 function main()
-    -- PENTING: Perintah ini memperbaiki input terminal yang rusak
-    os.execute("stty sane") 
-    
+    -- FINAL FIX: Override print agar selalu menggunakan \r\n
+    -- Ini mengabaikan apakah terminal mode raw atau cooked
+    print = safe_print
+
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        cprint("ZEEN TOOLS v5.4 (ANTI-TANGGA FIX)")
-        cprint("1. Start Auto Grid & Monitor")
-        cprint("2. Detect Roblox")
-        cprint("3. List Packages")
-        cprint("4. Settings (VIP/Webhook)")
-        cprint("5. Clear Data")
-        cprint("6. Exit")
+        print("ZEEN TOOLS v5.5 (ULTIMATE FIX)")
+        print("1. Start Auto Grid & Monitor")
+        print("2. Detect Roblox")
+        print("3. List Packages")
+        print("4. Settings (VIP/Webhook)")
+        print("5. Clear Data")
+        print("6. Exit")
         
-        local choice = cinput("Pilih: ")
+        local choice = safe_input("Pilih: ")
         
         if choice == "1" then launchAutoGrid()
         elseif choice == "2" then autoDetectRoblox()
         elseif choice == "3" then 
             clearScreen()
-            cprint("=== LIST PACKAGES ===")
-            for i,p in ipairs(packages) do cprint(i..". "..p.name) end 
-            cinput("\nTekan Enter kembali...")
+            print("=== LIST PACKAGES ===")
+            for i,p in ipairs(packages) do print(i..". "..p.name) end 
+            safe_input("\nTekan Enter kembali...")
         elseif choice == "4" then menuSettings()
-        elseif choice == "5" then packages={}; saveAll(); cprint("Cleared."); cinput("Enter...")
+        elseif choice == "5" then packages={}; saveAll(); print("Cleared."); safe_input("Enter...")
         elseif choice == "6" then 
             os.execute("stty sane")
             break 
