@@ -1,12 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.8 (STABLE LOGIC)
+-- PROJECT ZEEN TOOLS v5.9 (KILL SWITCH)
 -- ==========================================
--- Update v5.8:
--- [+] GRACE PERIOD: Jeda 20s toleransi awal
--- [+] FIX LOOP: Mencegah restart berulang
--- [+] SOFT EXIT: Ketik 'q' untuk stop
+-- Update v5.9:
+-- [+] KILL SWITCH: Mematikan total sistem loop
+-- [+] PROCESS CLEANUP: Hapus sisa sleep/curl
+-- [+] FIX: Termux close tapi script jalan
 -- ==========================================
 
 -- 1. RESET TERMINAL AGAR INPUT TERBACA
@@ -46,22 +46,20 @@ end
 -- KONFIGURASI SYSTEM
 -- ==========================================
 local WATCHDOG_INTERVAL = 5
-local GRACE_PERIOD = 25       -- [PENTING] Jangan cek PID selama 25 detik awal
-local QUEUE_DELAY = 30        -- Jeda antrian restart
+local GRACE_PERIOD = 25       
+local QUEUE_DELAY = 30        
 local STABLE_TIME = 60
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
 local DISPLAY_WIDTH = 1280 
 local DISPLAY_HEIGHT = 720 
 
--- File paths
 local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
 local CONFIG_FILE = "/data/data/com.termux/files/home/.zeen_config.txt"
 local WEBHOOK_FILE = "/data/data/com.termux/files/home/.zeen_webhook.txt"
 local VIP_FILE = "/data/data/com.termux/files/home/.zeen_vip.txt"
 local TEMP_SCRIPT = "/data/data/com.termux/files/home/.temp_cmd.sh"
 
--- Data storage
 local packages = {}
 local app_states = {} 
 local global_last_restart = 0 
@@ -141,7 +139,7 @@ function modifyUGClonerPrefs(package, position, numApps)
 end
 
 -- ==========================================
--- APP MANAGEMENT (FIX RESTART LOOP)
+-- APP MANAGEMENT
 -- ==========================================
 
 function getProcessInfo(package)
@@ -173,7 +171,6 @@ function sendDiscordWebhook()
     
     for _, pkg in ipairs(packages) do
         local state = app_states[pkg.package]
-        -- Logic Online di webhook juga pakai grace period
         local is_launching = (os.time() < state.ignoreUntil)
         local pid, proc_state, rss_kb = nil, nil, nil
         
@@ -204,8 +201,8 @@ function sendDiscordWebhook()
     end
     
     fields = fields:sub(1, -2)
-    local color = 65280 -- Green
-    if total_offline > 0 then color = 16711680 end -- Red
+    local color = 65280 
+    if total_offline > 0 then color = 16711680 end 
     
     local json_payload = string.format([[
     {
@@ -229,7 +226,27 @@ function sendDiscordWebhook()
 end
 
 -- ==========================================
--- MONITORING LOOP (FIX CTRL+C & LOOP)
+-- KILL SWITCH FUNCTION
+-- ==========================================
+function hardExit()
+    -- Fungsi ini memastikan skrip mati TOTAL
+    io.write("\r\n\027[1;31m[SYSTEM] STOPPING ALL PROCESSES...\027[0m\r\n")
+    
+    -- 1. Matikan semua sleep timer yang mungkin nyangkut
+    os.execute("pkill -9 sleep")
+    
+    -- 2. Matikan semua curl webhook background
+    os.execute("pkill -9 curl")
+    
+    -- 3. Reset Terminal
+    os.execute("stty sane")
+    
+    -- 4. Matikan diri sendiri
+    os.exit()
+end
+
+-- ==========================================
+-- MONITORING LOOP
 -- ==========================================
 function startMonitoring()
     for i, pkg in ipairs(packages) do
@@ -237,15 +254,13 @@ function startMonitoring()
             app_states[pkg.package] = { 
                 startTime = os.time(), 
                 status = "Init",
-                ignoreUntil = os.time() + GRACE_PERIOD -- AKTIFKAN GRACE PERIOD AWAL
+                ignoreUntil = os.time() + GRACE_PERIOD 
             }
         end
     end
     
     local next_webhook_time = os.time() + 5 
     clearScreen()
-
-    -- Set terminal ke non-blocking read jika memungkinkan, atau gunakan stty sane
     os.execute("stty sane") 
 
     while true do
@@ -254,25 +269,21 @@ function startMonitoring()
         io.write("\027[H") 
         
         safe_print("========================================")
-        safe_print("     ZEEN TOOLS v5.8 (STABLE LOGIC)")
+        safe_print("     ZEEN TOOLS v5.9 (KILL SWITCH)")
         safe_print("========================================")
         safe_print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
-        safe_print(" [KETIK 'q' ENTER UNTUK KELUAR]")
+        safe_print(" [KETIK 'q' ENTER UNTUK STOP TOTAL]")
         safe_print("========================================")
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
             
-            -- [LOGIKA PENTING] GRACE PERIOD CHECK
             if current_time < state.ignoreUntil then
-                -- JIKA MASIH DALAM MASA TENGGANG, JANGAN CEK PID!
-                -- Anggap aplikasi sedang loading.
                 local timeLeft = state.ignoreUntil - current_time
                 status_text = string.format("Starting (%ds)", timeLeft)
-                state.status = "ALIVE" -- Paksa status hidup agar tidak dibunuh
+                state.status = "ALIVE" 
             else
-                -- Masa tenggang habis, baru cek PID beneran
                 local pid, proc_state, rss = getProcessInfo(pkg.package)
                 
                 if pid then
@@ -291,18 +302,15 @@ function startMonitoring()
                 end
             end
 
-            -- LOGIKA RESTART (HANYA JIKA DEAD)
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 
                 if time_since_last_restart >= QUEUE_DELAY then
                     status_text = "Retrying..."
                     killAndStart(pkg.package)
-                    
-                    -- RESET TIMER & SET GRACE PERIOD BARU
                     state.startTime = current_time
                     global_last_restart = current_time
-                    state.ignoreUntil = current_time + GRACE_PERIOD -- BERI WAKTU NAPAS 25 DETIK
+                    state.ignoreUntil = current_time + GRACE_PERIOD 
                     state.status = "ALIVE"
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
@@ -324,25 +332,19 @@ function startMonitoring()
             next_webhook_time = current_time + webhook_conf.interval
         end
         
-        -- [FIX CTRL+C] GANTI SLEEP DENGAN READ MANUAL
-        -- Ini membuat script responsif terhadap keyboard (q + Enter)
+        -- INPUT CHECK (NON-BLOCKING STYLE)
         io.write("\r\n> Command (q=Quit): ")
         io.stdout:flush()
         
-        -- Gunakan read dengan timeout trick (di bash) atau non-blocking check
-        -- Tapi di lua standard susah. Kita gunakan sleep pendek loop.
-        local user_input = nil
-        
-        -- Hack: Gunakan 'read -t' dari shell untuk sleep interaktif
         local handle = io.popen("read -t " .. WATCHDOG_INTERVAL .. " input; echo $input")
+        local user_input = nil
         if handle then
             user_input = handle:read("*l")
             handle:close()
         end
         
         if user_input == "q" then
-            os.execute("stty sane")
-            safe_print("\nKeluar dari monitoring...")
+            hardExit() -- PANGGIL FUNGSI KILL SWITCH
             break
         end
     end
@@ -474,14 +476,11 @@ function launchAutoGrid()
         safe_print("[" .. i .. "] Launching " .. pkg.name .. "...")
         modifyUGClonerPrefs(pkg.package, i, maxApps)
         killAndStart(pkg.package)
-        
-        -- SET GRACE PERIOD AWAL: JANGAN CEK SELAMA 25 DETIK
         app_states[pkg.package] = { 
             startTime = os.time(), 
             status = "Launched",
             ignoreUntil = os.time() + GRACE_PERIOD 
         }
-        
         if i < maxApps then os.execute("sleep " .. config.delay) end
     end
     
@@ -494,7 +493,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        safe_print("ZEEN TOOLS v5.8 (STABLE LOGIC)")
+        safe_print("ZEEN TOOLS v5.9 (KILL SWITCH)")
         safe_print("1. Start Auto Grid & Monitor")
         safe_print("2. Detect Roblox")
         safe_print("3. List Packages")
@@ -514,7 +513,7 @@ function main()
         elseif choice == "4" then menuSettings()
         elseif choice == "5" then packages={}; saveAll(); safe_print("Cleared."); safe_input("Enter...")
         elseif choice == "6" then 
-            os.execute("stty sane")
+            hardExit() -- GUNAKAN KILL SWITCH SAAT EXIT
             break 
         end
     end
