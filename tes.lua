@@ -1,57 +1,28 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v8.2 (STABLE NET & UI)
+-- PROJECT ZEEN TOOLS v8.3 (STABLE FINAL)
 -- ==========================================
--- Update v8.2:
--- [+] UI FIX: Tampilan tabel rapi & RAM di baris baru
--- [+] NET FIX: Grace Period 90s (Anti Restart saat Loading)
--- [+] NET FIX: Threshold 100 bytes & 5 Strike (Anti Lag Kill)
--- [+] MONITOR FIX: Menghitung Real App Aktif
+-- Update v8.3:
+-- [+] UI FIX: Menggunakan Fixed Width Formatting (Anti Geser)
+-- [+] NET SAFE: Network Kill DIMATIKAN (Hanya Visual)
+-- [+] REAL COUNT: Menghitung App Aktif berdasarkan PID
+-- [+] KEYBOARD: Input Fix tetap aktif
 -- ==========================================
 
--- 1. SETUP TERMINAL TOTAL
+-- 1. SETUP TERMINAL
 os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- FUNGSI DISPLAY & UI
--- ==========================================
-
-function trim(s)
-   return (s:gsub("^%s*(.-)%s*$", "%1"))
-end
-
-function safe_input(prompt)
-    os.execute("stty cooked icrnl echo >/dev/null 2>&1")
-    io.stdout:flush()
-    io.write(prompt)
-    io.stdout:flush()
-    local result = io.read()
-    if not result then return "" end
-    return trim(result)
-end
-
-function clearScreen()
-    -- Gunakan clear bawaan OS, lebih bersih di Android 10
-    os.execute("clear") 
-end
-
-function resetCursor()
-    -- Hanya kembalikan kursor ke atas
-    io.write("\027[H")
-    io.stdout:flush()
-end
-
--- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local WATCHDOG_INTERVAL = 3   
-local GRACE_PERIOD = 90       -- DIPERPANJANG: 90 Detik toleransi loading awal
-local QUEUE_DELAY = 30        -- Jeda antar restart
+local WATCHDOG_INTERVAL = 2   
+local GRACE_PERIOD = 90       -- Toleransi loading 90 detik
+local QUEUE_DELAY = 30        
 local STABLE_TIME = 60        
-local TRAFFIC_THRESHOLD = 100 -- DITURUNKAN: Cukup 100 bytes (detak jantung server)
-local MAX_STRIKES = 5         -- DIPERBANYAK: 5x data macet baru kill
+local TRAFFIC_THRESHOLD = 100 -- Batas data (Visual Only)
+local ENABLE_NET_KILL = false -- [SAFETY] JANGAN KILL KARENA SINYAL
 
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -77,8 +48,27 @@ local launch_queue_index = 1
 local next_launch_time = 0 
 
 -- ==========================================
--- SYSTEM HELPERS
+-- FUNGSI UI & HELPER
 -- ==========================================
+
+function trim(s)
+   return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
+
+function safe_input(prompt)
+    os.execute("stty cooked icrnl echo >/dev/null 2>&1")
+    io.stdout:flush()
+    io.write(prompt)
+    io.stdout:flush()
+    local result = io.read()
+    if not result then return "" end
+    return trim(result)
+end
+
+function clearScreen()
+    io.write("\027[H\027[2J") 
+    io.stdout:flush()
+end
 
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
@@ -106,7 +96,7 @@ function getFreeRAM()
         local gb = tonumber(kb) / 1024 / 1024
         return string.format("%.2f GB", gb)
     end
-    return "Unknown"
+    return "0.00 GB"
 end
 
 -- ==========================================
@@ -295,6 +285,7 @@ function cleanupAndPrepare()
     buffer = buffer .. "========================================\r\n"
     local any_reset = false
     for i, pkg in ipairs(packages) do
+        -- Init State: START FRESH
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
@@ -315,7 +306,7 @@ function cleanupAndPrepare()
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP
+-- MAIN MONITOR LOOP (FIX UI & COUNT)
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
@@ -340,7 +331,6 @@ function startMonitoring()
                 local state = app_states[pkg.package]
                 state.status = "Launched"
                 state.startTime = current_time
-                -- 90 Detik toleransi (Diperpanjang)
                 state.ignoreUntil = current_time + GRACE_PERIOD
                 state.strikes = 0
                 state.lastBytes = getNetworkBytes(state.uid)
@@ -351,44 +341,47 @@ function startMonitoring()
             end
         end
 
-        -- B. RENDER BUFFER (UI FIX)
+        -- B. RENDER DASHBOARD (FIX UI)
         local buffer = ""
         local free_ram = getFreeRAM()
         
-        -- Hitung app yg benar-benar sudah Launched/Alive
-        local launched_count = 0
+        -- HITUNG REAL ACTIVE APP (Yang punya PID)
+        local active_count = 0
         for _, pkg in ipairs(packages) do
-            if app_states[pkg.package].status ~= "Ready" then
-                launched_count = launched_count + 1
-            end
+            local pid_out = exec("pidof " .. pkg.package)
+            if pid_out ~= "" then active_count = active_count + 1 end
         end
 
-        -- Header Rapi (Anti-Kacau)
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v8.2 (STABLE NET & UI)\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v8.3 (STABLE FINAL)\r\n"
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" MONITORING : %d/%d\r\n", launched_count, #packages)
+        buffer = buffer .. string.format(" ACTIVE APPS: %d/%d     \r\n", active_count, #packages)
         buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" %-3s %-12s %-16s %s\r\n", "NO", "NAME", "STATUS", "NET")
+        -- FIXED WIDTH HEADER
+        buffer = buffer .. string.format(" %-2s %-12s %-14s %s\r\n", "NO", "NAME", "STATUS", "NET")
         buffer = buffer .. "----------------------------------------------\r\n"
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
-            local status_text = "\027[1;30mUnknown\027[0m"
+            local status_text = "Unknown"
             local net_text = "-"
             local force_kill = false
             
             if state.status == "Ready" then
-                status_text = "\027[1;36mReady\027[0m" 
+                -- Warna Cyan
+                status_text = "\027[1;36mReady\027[0m       " 
             
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
-                -- 1. GRACE PERIOD (Loading: Kuning)
+                -- 1. GRACE PERIOD (Loading)
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
-                    status_text = string.format("\027[1;33mLoad (%ds)\027[0m", timeLeft) 
+                    -- Warna Kuning
+                    -- Format fixed width 14 char agar tidak geser
+                    local str = string.format("Load (%ds)", timeLeft)
+                    status_text = string.format("\027[1;33m%-14s\027[0m", str) 
+                    
                     state.status = "ALIVE"
-                    -- Update bytes diam-diam, JANGAN DIHITUNG STRIKE SAAT LOADING
                     state.lastBytes = getNetworkBytes(state.uid) 
                     net_text = "Wait"
                 else
@@ -399,38 +392,40 @@ function startMonitoring()
                         local delta = currBytes - state.lastBytes
                         state.lastBytes = currBytes
                         
-                        -- Traffic Watchdog (Lebih Santai)
+                        -- MONITOR DATA (VISUAL ONLY - NO KILL)
                         if delta < TRAFFIC_THRESHOLD then
                             state.strikes = state.strikes + 1
-                            net_text = string.format("\027[1;31mLOW (%d)\027[0m", state.strikes)
-                            if state.strikes >= MAX_STRIKES then force_kill = true end
+                            net_text = string.format("\027[1;31mSTUCK (%d)\027[0m", state.strikes)
+                            -- JIKA ENABLE_NET_KILL = true baru kill
+                            if ENABLE_NET_KILL and state.strikes >= 20 then force_kill = true end
                         else
                             state.strikes = 0
-                            -- Hitung estimasi KB/s
                             local kbs = math.floor(delta / 1024 / WATCHDOG_INTERVAL)
                             net_text = string.format("\027[1;32m%d KB\027[0m", kbs)
                         end
                         state.netStatus = net_text 
 
                         local duration = current_time - state.startTime
-                        if duration < STABLE_TIME then status_text = "\027[1;32mLaunch\027[0m"
-                        else status_text = "\027[1;32;1mOnline\027[0m" end 
+                        if duration < STABLE_TIME then 
+                            status_text = "\027[1;32mLaunch        \027[0m"
+                        else 
+                            status_text = "\027[1;32;1mOnline        \027[0m" 
+                        end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mCrash\027[0m" 
+                        status_text = "\027[1;31mCrash         \027[0m" 
                         state.status = "DEAD"
                         net_text = "Dead"
                     end
                 end
             end
 
-            -- RESTART LOGIC
+            -- RESTART LOGIC (Only PID Crash or Explicit Kill)
             if force_kill or state.status == "DEAD" then
                 state.status = "DEAD" 
                 local time_since_last_restart = current_time - global_last_restart
                 
                 if time_since_last_restart >= QUEUE_DELAY then
-                    if force_kill then status_text = "\027[1;31mKILLED\027[0m" end
                     killAndStart(pkg.package)
                     state.startTime = current_time
                     state.ignoreUntil = current_time + GRACE_PERIOD
@@ -439,13 +434,16 @@ function startMonitoring()
                     global_last_restart = current_time 
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    status_text = string.format("\027[1;31mQueue(%ds)\027[0m", wait_left)
+                    local str = string.format("Queue(%ds)", wait_left)
+                    status_text = string.format("\027[1;31m%-14s\027[0m", str)
                 end
             end
             
+            -- UI NAME TRUNCATE (Max 12 chars)
             local shortName = pkg.name:sub(1, 12)
-            -- Gunakan %-12s agar lebar nama fix, tidak menggeser kolom lain
-            buffer = buffer .. string.format(" [%d] %-12s %-16s %s\r\n", i, shortName, status_text, net_text)
+            -- FORMAT DATA FIXED WIDTH:
+            -- [%d] Name(12) Status(14) Net
+            buffer = buffer .. string.format(" [%d] %-12s %s %s\r\n", i, shortName, status_text, net_text)
         end
         
         buffer = buffer .. "==============================================\r\n"
@@ -459,7 +457,7 @@ function startMonitoring()
             buffer = buffer .. "\027[K\r" 
         end
         
-        -- RESET KURSOR (TANPA CLEAR TOTAL) AGAR TIDAK KEDIP
+        -- RENDER
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
@@ -606,7 +604,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v8.2 (STABLE NET & UI)\r\n")
+        io.write("ZEEN TOOLS v8.3 (STABLE FINAL)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
