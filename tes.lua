@@ -1,25 +1,27 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.9 (KILL SWITCH)
+-- PROJECT ZEEN TOOLS v6.0 (SILENT & STABLE)
 -- ==========================================
--- Update v5.9:
--- [+] KILL SWITCH: Mematikan total sistem loop
--- [+] PROCESS CLEANUP: Hapus sisa sleep/curl
--- [+] FIX: Termux close tapi script jalan
+-- Update v6.0:
+-- [+] ANTI-FLICKER: UI Diam & Halus
+-- [+] RAM MONITOR: Menampilkan Free RAM
+-- [+] SILENT EXIT: Tidak ada log sampah saat Q
+-- [+] APP 1 FIX: Absolute Grace Period
 -- ==========================================
 
--- 1. RESET TERMINAL AGAR INPUT TERBACA
+-- 1. SETUP TERMINAL
 os.execute("stty sane") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- FUNGSI DISPLAY & INPUT
+-- FUNGSI DISPLAY & UI (ANTI-FLICKER)
 -- ==========================================
 
 function safe_print(str)
     str = tostring(str or "")
-    io.write(str .. "\r\n")
+    -- \027[K membersihkan sisa karakter di baris tersebut agar tidak ada "hantu"
+    io.write(str .. "\027[K\r\n")
     io.stdout:flush()
 end
 print = safe_print
@@ -38,7 +40,15 @@ function safe_input(prompt)
 end
 
 function clearScreen()
+    -- Clear total (Hanya dipakai saat pindah menu)
     io.write("\027[H\027[2J")
+    io.stdout:flush()
+end
+
+function resetCursor()
+    -- Kembalikan kursor ke pojok kiri atas TANPA menghapus layar
+    -- Ini rahasia agar tidak kedip
+    io.write("\027[H")
     io.stdout:flush()
 end
 
@@ -46,7 +56,7 @@ end
 -- KONFIGURASI SYSTEM
 -- ==========================================
 local WATCHDOG_INTERVAL = 5
-local GRACE_PERIOD = 25       
+local GRACE_PERIOD = 30       -- Diperpanjang ke 30s agar App 1 aman
 local QUEUE_DELAY = 30        
 local STABLE_TIME = 60
 local STATUS_BAR_HEIGHT = 60
@@ -79,7 +89,8 @@ function exec(cmd)
     f:close()
     os.execute("chmod +x " .. TEMP_SCRIPT)
     
-    local handle = io.popen("su -c " .. TEMP_SCRIPT)
+    -- Bungkus stderr ke null agar tidak bocor ke layar
+    local handle = io.popen("su -c '" .. TEMP_SCRIPT .. "' 2>/dev/null")
     local result = handle:read("*a")
     handle:close()
     
@@ -91,6 +102,16 @@ function getDeviceName()
     local model = exec("getprop ro.product.model"):gsub("\n", "")
     if model == "" then model = "Termux Device" end
     device_name = model
+end
+
+function getFreeRAM()
+    local output = exec("cat /proc/meminfo | grep MemAvailable")
+    local kb = output:match("(%d+)")
+    if kb then
+        local gb = tonumber(kb) / 1024 / 1024
+        return string.format("%.1f GB", gb)
+    end
+    return "Unknown"
 end
 
 -- ==========================================
@@ -143,6 +164,7 @@ end
 -- ==========================================
 
 function getProcessInfo(package)
+    -- Menggunakan ps -A agar lebih kompatibel dengan Android modern
     local out = exec("ps -A -o pid,state,rss,args | grep " .. package .. " | grep -v grep | head -n 1")
     local pid, state, rss = out:match("(%d+)%s+([%w])%s+(%d+)")
     return pid, state, tonumber(rss)
@@ -222,26 +244,25 @@ function sendDiscordWebhook()
     ]], time_now, device_name, total_online, total_offline, #packages, color, fields, time_now)
 
     local curl_cmd = string.format("curl -H \"Content-Type: application/json\" -X POST -d '%s' %s", json_payload:gsub("\n", " "), webhook_conf.url)
+    -- Bungkus curl ke null juga
     os.execute(curl_cmd .. " > /dev/null 2>&1 &") 
 end
 
 -- ==========================================
--- KILL SWITCH FUNCTION
+-- KILL SWITCH (CLEAN EXIT)
 -- ==========================================
 function hardExit()
-    -- Fungsi ini memastikan skrip mati TOTAL
-    io.write("\r\n\027[1;31m[SYSTEM] STOPPING ALL PROCESSES...\027[0m\r\n")
+    -- Bersihkan layar sebelum pesan keluar
+    clearScreen()
+    print("================================")
+    print("      STOPPING PROCESSES...     ")
+    print("================================")
     
-    -- 1. Matikan semua sleep timer yang mungkin nyangkut
     os.execute("pkill -9 sleep")
-    
-    -- 2. Matikan semua curl webhook background
     os.execute("pkill -9 curl")
-    
-    -- 3. Reset Terminal
     os.execute("stty sane")
     
-    -- 4. Matikan diri sendiri
+    print("\n✓ Stopped. Bye!")
     os.exit()
 end
 
@@ -260,41 +281,48 @@ function startMonitoring()
     end
     
     local next_webhook_time = os.time() + 5 
+    
+    -- Clear awal saja
     clearScreen()
     os.execute("stty sane") 
 
     while true do
         local current_time = os.time()
         
-        io.write("\027[H") 
+        -- RESET KURSOR (JANGAN CLEAR LAYAR, CUKUP OVERWRITE)
+        resetCursor()
+        
+        -- Ambil RAM
+        local free_ram = getFreeRAM()
         
         safe_print("========================================")
-        safe_print("     ZEEN TOOLS v5.9 (KILL SWITCH)")
+        safe_print("     ZEEN TOOLS v6.0 (SILENT & STABLE)")
         safe_print("========================================")
-        safe_print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
-        safe_print(" [KETIK 'q' ENTER UNTUK STOP TOTAL]")
+        safe_print(string.format(" Monitor : %d Apps    |    RAM: %s", #packages, free_ram))
+        safe_print(" Queue   : 30s        |    VIP: " .. (vip_link ~= "" and "ON" or "OFF"))
         safe_print("========================================")
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
             
+            -- [LOGIKA ABSOLUTE] JIKA IGNORE, JANGAN SENTUH PID
             if current_time < state.ignoreUntil then
                 local timeLeft = state.ignoreUntil - current_time
-                status_text = string.format("Starting (%ds)", timeLeft)
-                state.status = "ALIVE" 
+                status_text = string.format("\027[1;33mStarting (%ds)\027[0m", timeLeft)
+                state.status = "ALIVE" -- Paksa Alive
             else
                 local pid, proc_state, rss = getProcessInfo(pkg.package)
                 
                 if pid then
                     if proc_state == "Z" then
-                        status_text = "Retrying (Zombie)"
+                        status_text = "\027[1;31mZombie (Kill)\027[0m"
                         exec("kill -9 " .. pid)
                         state.status = "DEAD"
                     else
                         local duration = current_time - state.startTime
-                        if duration < STABLE_TIME then status_text = "Launched"
-                        else status_text = "Online" end
+                        if duration < STABLE_TIME then status_text = "\027[1;32mLaunched\027[0m"
+                        else status_text = "\027[1;32mOnline\027[0m" end
                         state.status = "ALIVE"
                     end
                 else
@@ -302,11 +330,12 @@ function startMonitoring()
                 end
             end
 
+            -- RESTART LOGIC
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 
                 if time_since_last_restart >= QUEUE_DELAY then
-                    status_text = "Retrying..."
+                    status_text = "\027[1;31mRetrying...\027[0m"
                     killAndStart(pkg.package)
                     state.startTime = current_time
                     global_last_restart = current_time
@@ -324,27 +353,30 @@ function startMonitoring()
         end
         
         safe_print("========================================")
+        safe_print(" [TEKAN 'q' LALU ENTER UNTUK KELUAR]    ")
         
+        -- WEBHOOK
         if webhook_conf.url ~= "" and current_time >= next_webhook_time then
-            io.write(" [Sending Webhook...]\027[K\r")
+            -- Print di baris khusus status tanpa merusak layout
+            io.write("\027[K\r[Sending Webhook...]") 
             io.stdout:flush()
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
+        else
+            io.write("\027[K\r") -- Bersihkan baris status webhook jika tidak kirim
         end
         
-        -- INPUT CHECK (NON-BLOCKING STYLE)
-        io.write("\r\n> Command (q=Quit): ")
-        io.stdout:flush()
-        
-        local handle = io.popen("read -t " .. WATCHDOG_INTERVAL .. " input; echo $input")
+        -- NON-BLOCKING INPUT (SILENT)
+        -- Gunakan 2>/dev/null untuk membuang error sh: read: timeout
+        local handle = io.popen("read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input")
         local user_input = nil
         if handle then
             user_input = handle:read("*l")
             handle:close()
         end
         
-        if user_input == "q" then
-            hardExit() -- PANGGIL FUNGSI KILL SWITCH
+        if user_input and trim(user_input) == "q" then
+            hardExit()
             break
         end
     end
@@ -493,7 +525,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        safe_print("ZEEN TOOLS v5.9 (KILL SWITCH)")
+        safe_print("ZEEN TOOLS v6.0 (SILENT & STABLE)")
         safe_print("1. Start Auto Grid & Monitor")
         safe_print("2. Detect Roblox")
         safe_print("3. List Packages")
@@ -513,7 +545,7 @@ function main()
         elseif choice == "4" then menuSettings()
         elseif choice == "5" then packages={}; saveAll(); safe_print("Cleared."); safe_input("Enter...")
         elseif choice == "6" then 
-            hardExit() -- GUNAKAN KILL SWITCH SAAT EXIT
+            hardExit()
             break 
         end
     end
