@@ -43,16 +43,19 @@ local device_name = "Android Device"
 -- ==========================================
 
 function resetTerminal()
-    -- Munculkan kursor kembali & reset atribut warna
-    io.write("\027[?25h") 
-    io.write("\027[0m")
+    -- Force terminal dimensions (landscape)
+    os.execute("stty cols 120 rows 30 2>/dev/null")
+    -- Show cursor & reset colors
+    io.write("\027[?25h\027[0m")
     io.stdout:flush()
 end
 
 function clearScreen()
-    -- Bersihkan layar dengan aman
-    io.write("\027[H\027[2J")
+    -- Multiple clearing methods for reliability
+    os.execute("clear 2>/dev/null || printf '\\033c'")
+    io.write("\027[H\027[2J\027[3J")
     io.stdout:flush()
+    os.execute("sleep 0.1")
 end
 
 -- Override print agar selalu flush dan rapi
@@ -434,6 +437,35 @@ function main()
     -- FIX BUFFERING ISSUE
     io.stdout:setvbuf("no")
     resetTerminal() -- RESET TERMINAL DI AWAL AGAR RAPI
+    
+    -- Check terminal orientation
+    local termWidth = tonumber(exec("tput cols 2>/dev/null") or "0")
+    local termHeight = tonumber(exec("tput lines 2>/dev/null") or "0")
+    
+    if termWidth > 0 and termHeight > 0 and termWidth < termHeight then
+        clearScreen()
+        print("╔════════════════════════════════════╗")
+        print("║   ⚠️  ORIENTATION WARNING  ⚠️      ║")
+        print("╚════════════════════════════════════╝")
+        print("")
+        print("Terminal detected in PORTRAIT mode!")
+        print("Current: " .. termWidth .. "x" .. termHeight)
+        print("")
+        print("For best experience:")
+        print("1. Rotate your device to LANDSCAPE")
+        print("2. Or use Rotation Control app")
+        print("3. Then restart this script")
+        print("")
+        print("Continue anyway? (y/n)")
+        io.write("> ")
+        io.stdout:flush()
+        local cont = io.read()
+        if not (cont == "y" or cont == "Y") then
+            resetTerminal()
+            os.exit(0)
+        end
+    end
+    
     getDeviceName()
     loadData()
     while true do
