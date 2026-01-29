@@ -1,86 +1,72 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v4.5 (MONITOR EDITION)
--- Auto Grid Freeform - UG Cloner Edition
+-- PROJECT ZEEN TOOLS v5.1 (ULTIMATE)
+-- Auto Grid - Monitoring - Webhook
 -- ==========================================
--- Update v4.5:
--- [+] FITUR MONITORING DASHBOARD
--- [+] Auto Restart jika Crash/FC (Tanpa Reset Grid)
--- [+] RAM Status Indicator
--- [+] Status: Launched > 60s -> Online
+-- Update v5.1:
+-- [+] FIX VIP LINK: Force open in App (-p flag)
+-- [+] FIX CTRL+C: Force Exit to Shell ($)
+-- [+] SMART QUEUE: Restart antri 30 detik
+-- [+] NO-BLINK DASHBOARD: UI Stabil
+-- [+] ZOMBIE KILLER: Deteksi proses macet
 -- ==========================================
 
--- KONFIGURASI MONITOR
-local WATCHDOG_INTERVAL = 20 -- Detik (Interval cek)
-local STABLE_TIME = 60       -- Waktu (detik) dianggap "Online" stabil
+-- KONFIGURASI SYSTEM
+local WATCHDOG_INTERVAL = 5   -- Refresh dashboard tiap 5 detik
+local QUEUE_DELAY = 30        -- Jeda restart antar aplikasi (detik)
+local STABLE_TIME = 60        -- Waktu dianggap "Online"
 
--- KONFIGURASI UMUM
+-- KONFIGURASI DEFAULT
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
+local DISPLAY_WIDTH = 1280 
+local DISPLAY_HEIGHT = 720 
 
 -- File paths
 local PACKAGE_FILE = "/data/data/com.termux/files/home/.roblox_packages.txt"
 local CONFIG_FILE = "/data/data/com.termux/files/home/.zeen_config.txt"
+local WEBHOOK_FILE = "/data/data/com.termux/files/home/.zeen_webhook.txt"
+local VIP_FILE = "/data/data/com.termux/files/home/.zeen_vip.txt"
 local TEMP_SCRIPT = "/data/data/com.termux/files/home/.temp_cmd.sh"
 
 -- Data storage
 local packages = {}
-local app_states = {} -- Menyimpan status & waktu start
+local app_states = {} 
+local global_last_restart = 0 
 local config = { delay = DEFAULT_DELAY }
-local DISPLAY_WIDTH = 1280 
-local DISPLAY_HEIGHT = 720 
+local webhook_conf = { url = "", interval = 300 } 
+local vip_link = ""
+local device_name = "Android Device"
 
 -- ==========================================
--- SYSTEM FUNCTIONS
+-- SYSTEM HELPERS
 -- ==========================================
 
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
     if not f then return "" end
-    f:write("#!/system/bin/sh\n")
-    f:write(cmd .. "\n")
+    f:write("#!/system/bin/sh\n" .. cmd .. "\n")
     f:close()
-    
     os.execute("chmod +x " .. TEMP_SCRIPT)
-    local output_file = "/data/data/com.termux/files/home/.temp_output.txt"
-    os.execute("su -c '" .. TEMP_SCRIPT .. " > " .. output_file .. " 2>&1'")
     
-    local result = ""
-    local rf = io.open(output_file, "r")
-    if rf then
-        result = rf:read("*a")
-        rf:close()
-    end
+    local handle = io.popen("su -c " .. TEMP_SCRIPT)
+    local result = handle:read("*a")
+    handle:close()
     
     os.remove(TEMP_SCRIPT)
-    os.remove(output_file)
-    return result
+    return result or ""
 end
 
-function getOrientation()
-    local result = exec("dumpsys window | grep 'mCurrentRotation'")
-    if result:match("ROTATION_90") or result:match("ROTATION_270") then return "landscape" else return "portrait" end
-end
-
-function updateScreenResolution()
-    local result = exec("wm size")
-    local w, h = result:match("Physical size: (%d+)x(%d+)")
-    if w and h then
-        w, h = tonumber(w), tonumber(h)
-        local ori = getOrientation()
-        if ori == "landscape" then
-            if w < h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
-        else
-            if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
-        end
-    end
+function getDeviceName()
+    local model = exec("getprop ro.product.model"):gsub("\n", "")
+    if model == "" then model = "Termux Device" end
+    device_name = model
 end
 
 -- ==========================================
 -- LAYOUT LOGIC (LEFT 2:1)
 -- ==========================================
-
 function getGridPositions(numApps)
     local usable_height = DISPLAY_HEIGHT - STATUS_BAR_HEIGHT
     local h_slot = math.floor(usable_height / 3)
@@ -124,105 +110,205 @@ function modifyUGClonerPrefs(package, position, numApps)
 end
 
 -- ==========================================
--- MONITORING LOGIC
+-- APP MANAGEMENT & STATS
 -- ==========================================
 
-function getFreeRAM()
-    -- Mengambil data MemAvailable dari /proc/meminfo
-    local res = exec("cat /proc/meminfo | grep MemAvailable")
-    local kb = res:match("(%d+)")
-    if kb then
-        local gb = tonumber(kb) / 1024 / 1024
-        return string.format("%.1fGB Free", gb)
+function getProcessInfo(package)
+    -- Mengembalikan PID, Status (R/S/Z), dan RSS (RAM in KB)
+    local out = exec("ps -A -o pid,state,rss,args | grep " .. package .. " | grep -v grep | head -n 1")
+    local pid, state, rss = out:match("(%d+)%s+([%w])%s+(%d+)")
+    return pid, state, tonumber(rss)
+end
+
+function killAndStart(package, isFirstTime)
+    exec("am force-stop " .. package)
+    
+    if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
+        -- FIXED: Menggunakan flag -p untuk memaksa membuka link DI DALAM package tersebut
+        -- Ini mencegah link terbuka di Browser/Chrome
+        local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s", vip_link, package)
+        exec(cmd)
+    else
+        -- Launch Normal
+        exec("am start " .. package)
     end
-    return "Unknown"
 end
 
-function isAppRunning(package)
-    -- Cek PID, jika ada return true
-    local pid = exec("pidof " .. package):gsub("%s+", "")
-    return pid ~= ""
+-- ==========================================
+-- WEBHOOK SYSTEM (DISCORD)
+-- ==========================================
+function sendDiscordWebhook()
+    if webhook_conf.url == "" then return end
+
+    local total_online = 0
+    local total_offline = 0
+    local fields = ""
+    local time_now = os.date("%H:%M %d-%b-%Y")
+    
+    for _, pkg in ipairs(packages) do
+        local state = app_states[pkg.package]
+        local pid, proc_state, rss_kb = getProcessInfo(pkg.package)
+        local is_online = (pid and proc_state ~= "Z")
+        
+        local status_icon = "🔴"
+        local ram_usage = "0MB"
+        local uptime = "0m"
+        
+        if is_online then
+            total_online = total_online + 1
+            status_icon = "🟢"
+            if rss_kb then ram_usage = string.format("%dMB", math.floor(rss_kb/1024)) end
+            local diff = os.time() - state.startTime
+            uptime = string.format("%dm", math.floor(diff/60))
+        else
+            total_offline = total_offline + 1
+        end
+
+        local field_val = string.format("`⏱️ %s | 💾 %s | ⚙️ N/A`", uptime, ram_usage)
+        if not is_online then field_val = "`🔻 OFFLINE`" end
+        
+        fields = fields .. string.format('{"name": "%s ||%s||", "value": "%s", "inline": false},', status_icon, pkg.name, field_val)
+    end
+    
+    fields = fields:sub(1, -2)
+    local color = 65280 -- Green
+    if total_offline > 0 then color = 16711680 end -- Red
+    
+    local json_payload = string.format([[
+    {
+      "content": null,
+      "embeds": [
+        {
+          "title": "ZEEN TOOLS | MONITOR STATUS",
+          "description": "Last Update: **%s**\nDevice: **%s**\n\n**Status:**\n🟢 Online: %d\n🔴 Offline: %d\n🤖 Total: %d",
+          "color": %d,
+          "fields": [%s],
+          "footer": {
+            "text": "ZEEN TOOLS | %s"
+          }
+        }
+      ]
+    }
+    ]], time_now, device_name, total_online, total_offline, #packages, color, fields, time_now)
+
+    local curl_cmd = string.format("curl -H \"Content-Type: application/json\" -X POST -d '%s' %s", json_payload:gsub("\n", " "), webhook_conf.url)
+    os.execute(curl_cmd .. " > /dev/null 2>&1 &") 
 end
 
+-- ==========================================
+-- MAIN MONITOR LOOP
+-- ==========================================
 function startMonitoring()
-    -- Setup awal state
+    -- Initial State Setup
     for i, pkg in ipairs(packages) do
-        -- Jika belum ada di state, masukkan
         if not app_states[pkg.package] then
-            app_states[pkg.package] = {
-                startTime = os.time(),
-                status = "Launched"
-            }
+            app_states[pkg.package] = { startTime = os.time(), status = "Init" }
         end
     end
+    
+    local next_webhook_time = os.time() + 5 
+
+    io.write("\027[?25l") -- Hide Cursor
+    io.write("\027[2J")   -- Clear Screen Once
 
     while true do
-        -- 1. Bersihkan Layar (Clear Screen ANSI code)
-        print("\027[H\027[2J")
+        local current_time = os.time()
         
-        -- 2. Cek Status Tiap App
-        local active_count = 0
-        local ram_info = getFreeRAM()
+        io.write("\027[H") -- Reset Cursor (No Blink)
         
-        -- Header Dashboard
         print("========================================")
-        print("     ZEEN MONITOR - LIVE DASHBOARD")
+        print("     ZEEN TOOLS v5.1 (ULTIMATE)")
         print("========================================")
-        print("")
-        print(string.format("Monitoring : %d/%d       |  RAM: %s", #packages, #packages, ram_info))
+        print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
+        if vip_link ~= "" then
+            print(" VIP Link: ACTIVE (Direct Pkg)")
+        else
+            print(" VIP Link: -")
+        end
         print("========================================")
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
-            local is_running = isAppRunning(pkg.package)
-            local display_status = "Unknown"
+            local pid, proc_state, rss = getProcessInfo(pkg.package)
+            local status_text = "Unknown"
             
-            if is_running then
-                active_count = active_count + 1
-                -- Hitung durasi hidup
-                local duration = os.time() - state.startTime
-                
-                if duration < STABLE_TIME then
-                    display_status = "Launched"
+            -- LOGIC CHECK
+            if pid then
+                if proc_state == "Z" then
+                    -- ZOMBIE DETECTED
+                    status_text = "Retrying (Zombie)"
+                    exec("kill -9 " .. pid)
+                    state.status = "DEAD"
                 else
-                    display_status = "Online"
+                    -- PROCESS ALIVE
+                    local duration = current_time - state.startTime
+                    if duration < STABLE_TIME then
+                        status_text = "Launched"
+                    else
+                        status_text = "Online"
+                    end
+                    state.status = "ALIVE"
                 end
-                
-                -- Update state internal
-                state.status = display_status
             else
-                -- APP MATI / CRASH
-                display_status = "Retrying"
-                state.status = "Retrying"
+                -- PROCESS DEAD
+                state.status = "DEAD"
+            end
+
+            -- QUEUE LOGIC FOR DEAD APPS
+            if state.status == "DEAD" then
+                local time_since_last_restart = current_time - global_last_restart
                 
-                -- Aksi Restart (Tanpa Modify Grid)
-                exec("am force-stop " .. pkg.package)
-                exec("am start " .. pkg.package)
-                
-                -- Reset timer
-                state.startTime = os.time()
+                if time_since_last_restart >= QUEUE_DELAY then
+                    status_text = "Retrying..."
+                    killAndStart(pkg.package, false)
+                    state.startTime = current_time
+                    global_last_restart = current_time
+                    state.status = "ALIVE"
+                else
+                    local wait_left = QUEUE_DELAY - time_since_last_restart
+                    status_text = string.format("Ready (%ds)", wait_left)
+                end
             end
             
-            -- Format Print Dashboard: [1] Nama : Status
-            -- Memotong nama paket agar tidak kepanjangan di dashboard
             local shortName = pkg.name:sub(1, 15)
-            print(string.format("[%d] %-16s : %s", i, shortName, display_status))
+            io.write(string.format("[%d] %-16s : %-20s\027[K\n", i, shortName, status_text))
         end
         
         print("========================================")
-        print("Tekan CTRL+C untuk stop monitoring.")
+        print(" CTRL+C to Stop & Exit to Shell ($)     \027[K")
         
-        -- Delay Refresh
-        os.execute("sleep " .. WATCHDOG_INTERVAL)
+        -- WEBHOOK CHECK
+        if webhook_conf.url ~= "" and current_time >= next_webhook_time then
+            io.write(" [Sending Webhook...]\027[K\r")
+            sendDiscordWebhook()
+            next_webhook_time = current_time + webhook_conf.interval
+        end
+        
+        -- FIX CTRL+C: Safe Sleep
+        -- Jika sleep diinterupsi oleh CTRL+C, dia akan mengembalikan status gagal/nil
+        -- Maka kita paksa exit program.
+        local sleep_ok = os.execute("sleep " .. WATCHDOG_INTERVAL)
+        if not sleep_ok then
+            io.write("\027[?25h") -- Show Cursor
+            os.exit() -- Force Exit ke Shell
+        end
     end
 end
 
 -- ==========================================
--- CORE FUNCTIONS
+-- MENU & CONFIG
 -- ==========================================
-
-function loadConfig()
-    local f = io.open(CONFIG_FILE, "r")
+function loadData()
+    local f = io.open(PACKAGE_FILE, "r")
+    if f then
+        packages = {}
+        for line in f:lines() do
+            local name, package = line:match("(.+)|(.+)")
+            if name and package then table.insert(packages, {name = name, package = package}) end
+        end
+        f:close()
+    end
+    f = io.open(CONFIG_FILE, "r")
     if f then
         for line in f:lines() do
             local key, val = line:match("(%w+)=(%d+)")
@@ -230,48 +316,51 @@ function loadConfig()
         end
         f:close()
     end
-end
-
-function saveConfig()
-    local f = io.open(CONFIG_FILE, "w")
-    if f then f:write("delay=" .. config.delay .. "\n"); f:close(); return true end; return false
-end
-
-function savePackages()
-    local file = io.open(PACKAGE_FILE, "w")
-    if file then
-        for _, pkg in ipairs(packages) do file:write(pkg.name .. "|" .. pkg.package .. "\n") end
-        file:close()
-        return true
+    f = io.open(WEBHOOK_FILE, "r")
+    if f then
+        local url = f:read("*l")
+        local interval = f:read("*l")
+        if url then webhook_conf.url = url end
+        if interval then webhook_conf.interval = tonumber(interval) end
+        f:close()
     end
-    return false
+    f = io.open(VIP_FILE, "r")
+    if f then vip_link = f:read("*a"):gsub("\n", ""); f:close() end
 end
 
-function loadPackages()
-    local file = io.open(PACKAGE_FILE, "r")
-    if file then
-        packages = {}
-        for line in file:lines() do
-            local name, package = line:match("(.+)|(.+)")
-            if name and package then table.insert(packages, {name = name, package = package}) end
-        end
-        file:close()
-    end
+function saveAll()
+    local f = io.open(CONFIG_FILE, "w"); f:write("delay=" .. config.delay .. "\n"); f:close()
+    f = io.open(WEBHOOK_FILE, "w"); f:write(webhook_conf.url .. "\n" .. webhook_conf.interval .. "\n"); f:close()
+    f = io.open(VIP_FILE, "w"); f:write(vip_link); f:close()
+    f = io.open(PACKAGE_FILE, "w")
+    for _, pkg in ipairs(packages) do f:write(pkg.name .. "|" .. pkg.package .. "\n") end
+    f:close()
 end
 
-function showSettings()
+function menuSettings()
     while true do
-        print("\n══ SETTINGS ══")
-        print("Current Delay: " .. config.delay .. " seconds")
-        print("1. Ubah Delay Launch")
-        print("2. Kembali")
+        print("\n══ SETTINGS & EXTRAS ══")
+        print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
+        print("2. Set Private Server Link (VIP)")
+        print("3. Set Discord Webhook")
+        print("4. Kembali")
         io.write("Pilih: ")
-        local choice = io.read()
-        if choice == "1" then
-            io.write("Delay baru (detik): ")
-            local newDelay = tonumber(io.read())
-            if newDelay and newDelay > 0 then config.delay = newDelay; saveConfig() end
-        elseif choice == "2" then break end
+        local c = io.read()
+        if c == "1" then
+            io.write("Delay (detik): "); config.delay = tonumber(io.read()) or 10; saveAll()
+        elseif c == "2" then
+            print("Masukkan Link VIP (Kosongkan untuk hapus):")
+            vip_link = io.read()
+            saveAll()
+        elseif c == "3" then
+            print("1. Set URL")
+            print("2. Set Interval (Detik)")
+            io.write(">> ")
+            local wc = io.read()
+            if wc == "1" then io.write("Webhook URL: "); webhook_conf.url = io.read()
+            elseif wc == "2" then io.write("Interval (cth: 300): "); webhook_conf.interval = tonumber(io.read()) or 300 end
+            saveAll()
+        elseif c == "4" then break end
     end
 end
 
@@ -296,76 +385,63 @@ function autoDetectRoblox()
                 table.insert(packages, {name = "Roblox " .. name, package = pkg})
             end
         end
-        savePackages()
+        saveAll()
     end
 end
 
 function launchAutoGrid()
-    print("\n══ AUTO GRID LAUNCH (MONITOR) ══")
+    print("\n══ LAUNCHING SEQUENCE ══")
     if #packages == 0 then print("✗ No packages!"); return end
-    updateScreenResolution()
     
-    print("ℹ Mode: Left Side 2:1 | Monitor: ON")
-    io.write("Lanjutkan? (y/n): ")
-    if io.read() ~= "y" then return end
-    
-    -- Inisialisasi state untuk monitoring
-    app_states = {}
-    
-    local maxApps = #packages
-    for i = 1, maxApps do
-        local pkg = packages[i]
-        print("\n[" .. i .. "/" .. maxApps .. "] " .. pkg.name)
-        
-        exec("am force-stop " .. pkg.package)
-        os.execute("sleep 0.5") 
-        
-        -- Modify Grid HANYA saat Launch awal
-        modifyUGClonerPrefs(pkg.package, i, maxApps)
-        
-        exec("am start " .. pkg.package)
-        
-        -- Simpan waktu start
-        app_states[pkg.package] = {
-            startTime = os.time(),
-            status = "Launched"
-        }
-        
-        if i < maxApps then
-            print("⏳ Waiting " .. config.delay .. "s...")
-            os.execute("sleep " .. config.delay)
+    local result = exec("wm size")
+    local w, h = result:match("Physical size: (%d+)x(%d+)")
+    if w then
+        w, h = tonumber(w), tonumber(h)
+        local ori = exec("dumpsys window | grep 'mCurrentRotation'")
+        if ori:match("ROTATION_90") or ori:match("ROTATION_270") then
+            if w < h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
+        else
+            if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
         end
     end
     
-    print("\n✓ Launch selesai. Memulai Monitoring Dashboard...")
-    os.execute("sleep 2")
-    startMonitoring() -- Masuk ke Loop Dashboard
-end
-
-function showMenu()
-    print("\nZEEN TOOLS v4.5 (MONITOR)")
-    print("1. Auto Grid & Monitor")
-    print("2. Detect Roblox")
-    print("3. List Packages")
-    print("4. Settings")
-    print("5. Clear Data")
-    print("6. Exit")
-    io.write("Pilih: ")
-    return io.read()
+    io.write("Start Farming? (y/n): ")
+    if io.read() ~= "y" then return end
+    
+    -- INITIAL LAUNCH
+    app_states = {}
+    local maxApps = #packages
+    for i = 1, maxApps do
+        local pkg = packages[i]
+        print("[" .. i .. "] Launching " .. pkg.name .. "...")
+        modifyUGClonerPrefs(pkg.package, i, maxApps)
+        killAndStart(pkg.package, true)
+        app_states[pkg.package] = { startTime = os.time(), status = "Launched" }
+        if i < maxApps then os.execute("sleep " .. config.delay) end
+    end
+    
+    startMonitoring()
 end
 
 function main()
     io.stdout:setvbuf("no")
-    loadPackages()
-    loadConfig() 
-    updateScreenResolution()
+    getDeviceName()
+    loadData()
     while true do
-        local choice = showMenu()
+        print("\nZEEN TOOLS v5.1 (ULTIMATE)")
+        print("1. Start Auto Grid & Monitor")
+        print("2. Detect Roblox")
+        print("3. List Packages")
+        print("4. Settings (VIP/Webhook)")
+        print("5. Clear Data")
+        print("6. Exit")
+        io.write("Pilih: ")
+        local choice = io.read()
         if choice == "1" then launchAutoGrid()
         elseif choice == "2" then autoDetectRoblox()
         elseif choice == "3" then for i,p in ipairs(packages) do print(i..". "..p.name) end 
-        elseif choice == "4" then showSettings()
-        elseif choice == "5" then packages={}; savePackages(); print("Cleared.")
+        elseif choice == "4" then menuSettings()
+        elseif choice == "5" then packages={}; saveAll(); print("Cleared.")
         elseif choice == "6" then break 
         end
     end
