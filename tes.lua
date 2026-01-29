@@ -1,31 +1,26 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v8.4 (FINAL STABLE)
+-- PROJECT ZEEN TOOLS v9.2 (WEBHOOK LOGIC FIX)
 -- ==========================================
--- Update v8.4:
--- [+] SCANNING LOOP: Indikator monitoring berputar (1->6->1)
--- [+] NET KILL ON: Mematikan app jika koneksi stuck/gagal
--- [+] UI CLEAN: Menghapus kolom NET
--- [+] KEYBOARD FIX: Perbaikan tombol Backspace
+-- Update v9.2:
+-- [+] WEBHOOK LOGIC: Kirim hanya saat SEMUA app selesai launch
+-- [+] INTERVAL FIX: Rutin kirim info setelah trigger awal
+-- [+] STABLE CORE: Dashboard, Keyboard, & Kill Switch aman
 -- ==========================================
 
 -- 1. SETUP TERMINAL TOTAL
--- stty sane: Reset terminal
--- erase ^H: Fix tombol backspace
--- cooked: Mode edit aktif
-os.execute("stty sane cooked erase ^H echo >/dev/null 2>&1") 
+os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
+local ZEEN_VERSION = "v9.2"
 local WATCHDOG_INTERVAL = 2   
-local GRACE_PERIOD = 90       -- Waktu kebal 90 detik awal
-local QUEUE_DELAY = 30        
+local GRACE_PERIOD = 90       -- Toleransi loading 90 detik
+local QUEUE_DELAY = 30        -- Jeda antar restart
 local STABLE_TIME = 60        
-local TRAFFIC_THRESHOLD = 100 -- Ambang batas data (bytes)
-local MAX_STRIKES = 5         -- Jika 5x (10-15 detik) data 0, KILL.
 
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -49,7 +44,8 @@ local device_name = "Android Device"
 -- Variabel Kontrol
 local launch_queue_index = 1    
 local next_launch_time = 0 
-local current_scan_index = 1 -- Counter Visual Berputar
+local scan_pointer = 1 
+local initial_webhook_sent = false -- Penanda apakah notifikasi awal sudah dikirim
 
 -- ==========================================
 -- FUNGSI UI & HELPER
@@ -60,8 +56,7 @@ function trim(s)
 end
 
 function safe_input(prompt)
-    -- Reset terminal agar Backspace berfungsi sebelum input
-    os.execute("stty sane cooked erase ^H echo >/dev/null 2>&1")
+    os.execute("stty sane cooked icrnl echo >/dev/null 2>&1")
     io.stdout:flush()
     io.write(prompt)
     io.stdout:flush()
@@ -292,7 +287,7 @@ function cleanupAndPrepare()
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
-            lastBytes = 0, strikes = 0
+            lastBytes = 0, netStatus = "Init"
         }
         
         local pid_out = exec("pidof " .. pkg.package)
@@ -316,15 +311,17 @@ function startMonitoring()
     
     launch_queue_index = 1    
     next_launch_time = os.time()
-    current_scan_index = 1 -- Start 1
-    local next_webhook_time = os.time() + 5 
+    scan_pointer = 1
+    initial_webhook_sent = false -- Reset status kirim webhook
+    local next_webhook_time = 0  -- Akan di-set setelah semua online
     
     clearScreen()
 
     while true do
         local current_time = os.time()
         
-        -- UPDATE LOGIC LAUNCHER
+        -- A. UPDATE LAUNCHER
+        local all_launched = false
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
@@ -335,86 +332,79 @@ function startMonitoring()
                 state.status = "Launched"
                 state.startTime = current_time
                 state.ignoreUntil = current_time + GRACE_PERIOD
-                state.strikes = 0
-                state.lastBytes = getNetworkBytes(state.uid)
                 
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
+        else
+            -- Semua sudah diluncurkan (antrian habis)
+            all_launched = true
         end
 
-        -- UPDATE VISUAL SCAN (BERPUTAR 1 -> 6 -> 1)
-        current_scan_index = current_scan_index + 1
-        if current_scan_index > #packages then current_scan_index = 1 end
+        -- B. UPDATE POINTER VISUAL
+        scan_pointer = scan_pointer + 1
+        if scan_pointer > #packages then scan_pointer = 1 end
 
-        -- RENDER BUFFER
+        -- C. RENDER DASHBOARD
         local buffer = ""
         local free_ram = getFreeRAM()
         
+        local launched_count = 0
+        for _, pkg in ipairs(packages) do
+            if app_states[pkg.package].status ~= "Ready" then
+                launched_count = launched_count + 1
+            end
+        end
+
+        buffer = buffer .. "\027[1;36m" 
+        buffer = buffer .. "███████╗███████╗███████╗███╗   ██╗\r\n"
+        buffer = buffer .. "╚══███╔╝██╔════╝██╔════╝████╗  ██║\r\n"
+        buffer = buffer .. "  ███╔╝ █████╗  █████╗  ██╔██╗ ██║\r\n"
+        buffer = buffer .. " ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║\r\n"
+        buffer = buffer .. "███████╗███████╗███████╗██║ ╚████║\r\n"
+        buffer = buffer .. "╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝\r\n"
+        buffer = buffer .. "        ZEEN TOOLS versi ("..ZEEN_VERSION..")\027[0m\r\n"
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. "     ZEEN TOOLS v8.4 (FINAL STABLE)\r\n"
-        buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" SCANNING   : [%d/%d]    \r\n", current_scan_index, #packages)
+        buffer = buffer .. string.format(" LAUNCHED   : %d/%d     \r\n", launched_count, #packages)
         buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" %-2s %-12s %-16s\r\n", "NO", "NAME", "STATUS")
+        buffer = buffer .. string.format(" %-3s %-12s %-16s\r\n", "NO", "NAME", "STATUS")
         buffer = buffer .. "----------------------------------------------\r\n"
 
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
-            local force_kill = false
             
-            -- INDIKATOR VISUAL
-            local pointer = (i == current_scan_index) and ">" or " "
+            local pointer_char = (i == scan_pointer) and ">" or " "
             
             if state.status == "Ready" then
-                status_text = "\027[1;36mReady\027[0m" 
+                status_text = "\027[1;36mReady\027[0m       " 
             
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
-                -- 1. GRACE PERIOD (Loading)
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
-                    status_text = string.format("\027[1;33mLoad (%ds)\027[0m", timeLeft) 
+                    local str = string.format("Load (%ds)", timeLeft)
+                    status_text = string.format("\027[1;33m%-14s\027[0m", str) 
                     state.status = "ALIVE"
-                    state.lastBytes = getNetworkBytes(state.uid) 
                 else
-                    -- 2. NORMAL MONITORING (PID + TRAFFIC)
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
-                        -- PID ADA, CEK TRAFFIC
-                        local currBytes = getNetworkBytes(state.uid)
-                        local delta = currBytes - state.lastBytes
-                        state.lastBytes = currBytes
-                        
-                        -- TRAFFIC LOGIC (ACTIVE KILL ENABLED)
-                        if delta < TRAFFIC_THRESHOLD then
-                            state.strikes = state.strikes + 1
-                            -- Beri peringatan visual
-                            status_text = string.format("\027[1;31mSTUCK (%d)\027[0m", state.strikes)
-                            
-                            -- KILL JIKA STRIKES SUDAH MAKSIMAL
-                            if state.strikes >= MAX_STRIKES then force_kill = true end
-                        else
-                            state.strikes = 0
-                            local duration = current_time - state.startTime
-                            if duration < STABLE_TIME then 
-                                status_text = "\027[1;32mLaunch\027[0m"
-                            else 
-                                status_text = "\027[1;32;1mOnline\027[0m" 
-                            end 
-                        end
+                        local duration = current_time - state.startTime
+                        if duration < STABLE_TIME then 
+                            status_text = "\027[1;32mLaunch        \027[0m"
+                        else 
+                            status_text = "\027[1;32;1mOnline        \027[0m" 
+                        end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mCrash\027[0m" 
+                        status_text = "\027[1;31mCrash         \027[0m" 
                         state.status = "DEAD"
                     end
                 end
             end
 
             -- RESTART LOGIC
-            if force_kill or state.status == "DEAD" then
-                state.status = "DEAD" 
+            if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 
                 if time_since_last_restart >= QUEUE_DELAY then
@@ -422,30 +412,39 @@ function startMonitoring()
                     state.startTime = current_time
                     state.ignoreUntil = current_time + GRACE_PERIOD
                     state.status = "ALIVE"
-                    state.strikes = 0
                     global_last_restart = current_time 
-                    -- Jika karena kill, status text akan ter-override di loop berikutnya jadi Load
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    status_text = string.format("\027[1;31mQueue(%ds)\027[0m", wait_left)
+                    local str = string.format("Queue(%ds)", wait_left)
+                    status_text = string.format("\027[1;31m%-14s\027[0m", str)
                 end
             end
             
             local shortName = pkg.name:sub(1, 12)
-            buffer = buffer .. string.format("%s[%d] %-12s %s\r\n", pointer, i, shortName, status_text)
+            buffer = buffer .. string.format("%s[%d] %-12s %s\r\n", pointer_char, i, shortName, status_text)
         end
         
         buffer = buffer .. "==============================================\r\n"
         buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]         \027[K\r\n"
         
-        if webhook_conf.url ~= "" and current_time >= next_webhook_time then
-            buffer = buffer .. "[Sending Webhook...]\027[K\r"
+        -- D. LOGIKA WEBHOOK (PERBAIKAN UTAMA)
+        -- 1. Jika SEMUA app sudah diluncurkan (all_launched) DAN belum kirim notif pertama
+        if all_launched and not initial_webhook_sent and webhook_conf.url ~= "" then
+            buffer = buffer .. "[Sending All Online Webhook...]\027[K\r"
+            sendDiscordWebhook()
+            initial_webhook_sent = true
+            -- Set jadwal berikutnya sesuai interval user
+            next_webhook_time = current_time + webhook_conf.interval
+        -- 2. Jika sudah kirim notif pertama, lanjut kirim rutin sesuai interval
+        elseif initial_webhook_sent and webhook_conf.url ~= "" and current_time >= next_webhook_time then
+            buffer = buffer .. "[Sending Routine Webhook...]\027[K\r"
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
         else
             buffer = buffer .. "\027[K\r" 
         end
         
+        -- RENDER
         io.write("\027[H" .. buffer) 
         io.stdout:flush()
         
@@ -592,7 +591,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        io.write("ZEEN TOOLS v8.4 (FINAL STABLE)\r\n")
+        io.write("ZEEN TOOLS v9.2 (WEBHOOK LOGIC FIX)\r\n")
         io.write("1. Start Auto Grid & Monitor\r\n")
         io.write("2. Detect Roblox\r\n")
         io.write("3. List Packages\r\n")
