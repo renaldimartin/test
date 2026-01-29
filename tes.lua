@@ -1,36 +1,28 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v7.0 (DASHBOARD FIRST)
+-- PROJECT ZEEN TOOLS v7.2 (CTRL+C FIX)
 -- ==========================================
--- Update v7.0:
--- [+] DASHBOARD FIRST: UI langsung muncul saat start
--- [+] QUEUE SYSTEM: Launching dilakukan di background
--- [+] STATUS READY: Menampilkan antrian sebelum launch
--- [+] AUTO RESET: Kill sisa app aktif sebelum mulai
+-- Update v7.2:
+-- [+] FIX CTRL+C: Menambahkan Trap Signal INT
+-- [+] SIGNAL HANDLER: CTRL+C mentrigger hardExit()
+-- [+] STABILITAS: Dashboard Buffered tetap dipertahankan
 -- ==========================================
 
--- 1. SETUP TERMINAL (Silent Mode)
+-- 1. SETUP TERMINAL
 os.execute("stty sane >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- FUNGSI DISPLAY & UI (ANTI-FLICKER)
+-- FUNGSI DISPLAY & UI (BUFFERED)
 -- ==========================================
-
-function safe_print(str)
-    str = tostring(str or "")
-    io.write(str .. "\027[K\r\n") -- Clear Line + CR + LF
-    io.stdout:flush()
-end
-print = safe_print
 
 function trim(s)
    return (s:gsub("^%s*(.-)%s*$", "%1"))
 end
 
 function safe_input(prompt)
-    os.execute("stty sane >/dev/null 2>&1")
+    io.stdout:flush()
     io.write(prompt)
     io.stdout:flush()
     local result = io.read()
@@ -39,21 +31,16 @@ function safe_input(prompt)
 end
 
 function clearScreen()
-    io.write("\027[H\027[2J") -- Clear total
-    io.stdout:flush()
-end
-
-function resetCursor()
-    io.write("\027[H") -- Reset ke pojok kiri atas
+    io.write("\027[H\027[2J") -- Clear Total + Home
     io.stdout:flush()
 end
 
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local WATCHDOG_INTERVAL = 2   -- Refresh UI lebih cepat (2s) agar animasi launch halus
-local GRACE_PERIOD = 35       -- Masa tenggang launch
-local QUEUE_DELAY = 30        -- Jeda antrian restart jika crash
+local WATCHDOG_INTERVAL = 2   
+local GRACE_PERIOD = 35       
+local QUEUE_DELAY = 30        
 local STABLE_TIME = 60
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -75,8 +62,8 @@ local vip_link = ""
 local device_name = "Android Device"
 
 -- Variabel Kontrol Launching
-local launch_queue_index = 1    -- App ke berapa yg akan dibuka
-local next_launch_time = 0      -- Kapan app berikutnya dibuka
+local launch_queue_index = 1    
+local next_launch_time = 0      
 
 -- ==========================================
 -- SYSTEM HELPERS (SILENT)
@@ -171,9 +158,7 @@ function getProcessInfo(package)
 end
 
 function killAndStart(package)
-    -- Hapus sisa-sisa sebelum start
     exec("am force-stop " .. package .. " >/dev/null 2>&1")
-    
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
         local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s >/dev/null 2>&1", vip_link, package)
         exec(cmd)
@@ -195,13 +180,11 @@ function sendDiscordWebhook()
     
     for _, pkg in ipairs(packages) do
         local state = app_states[pkg.package]
-        -- Logic: Launching OR Running
         local is_online = false
         local rss_kb = 0
         local uptime = "0m"
         
         if state.status == "Ready" then
-            -- Skip webhook count for Ready apps or treat as offline/pending
             total_offline = total_offline + 1
         else
             local is_launching = (os.time() < state.ignoreUntil)
@@ -260,14 +243,20 @@ function sendDiscordWebhook()
 end
 
 function hardExit()
-    clearScreen()
-    print("================================")
-    print("      STOPPING PROCESSES...     ")
-    print("================================")
+    -- Clear layar dan tampilkan pesan keluar
+    io.write("\027[H\027[2J")
+    io.write("================================\r\n")
+    io.write("      STOPPING PROCESSES...     \r\n")
+    io.write("================================\r\n")
+    io.stdout:flush()
+    
+    -- Paksa kill semua proses terkait
     os.execute("pkill -9 sleep >/dev/null 2>&1")
     os.execute("pkill -9 curl >/dev/null 2>&1")
-    os.execute("stty sane >/dev/null 2>&1")
-    print("\n✓ Stopped. Bye!")
+    os.execute("pkill -9 read >/dev/null 2>&1") -- Kill input reader jika nyangkut
+    
+    io.write("\n✓ Stopped. Bye!\r\n")
+    io.stdout:flush()
     os.exit()
 end
 
@@ -275,168 +264,141 @@ end
 -- PRE-FLIGHT CHECK (RESETTING)
 -- ==========================================
 function cleanupAndPrepare()
-    -- Cek apakah ada app yang sedang berjalan, jika ada kill dulu
-    clearScreen()
-    print("========================================")
-    print("     PREPARING ENVIRONMENT...")
-    print("========================================")
+    local buffer = ""
+    buffer = buffer .. "========================================\r\n"
+    buffer = buffer .. "     PREPARING ENVIRONMENT...\r\n"
+    buffer = buffer .. "========================================\r\n"
     
     local any_reset = false
     for i, pkg in ipairs(packages) do
-        local pid = exec("pidof " .. pkg.package)
-        if pid and pid ~= "" then
+        app_states[pkg.package] = { startTime = 0, status = "Ready", ignoreUntil = 0 }
+        
+        local pid_out = exec("pidof " .. pkg.package)
+        if pid_out and pid_out ~= "" then
             any_reset = true
-            print(string.format(" [Resetting] %s...", pkg.name))
+            buffer = buffer .. string.format(" [Resetting] %s...\r\n", pkg.name)
             exec("am force-stop " .. pkg.package .. " >/dev/null 2>&1")
         end
-        -- Inisialisasi status awal
-        app_states[pkg.package] = {
-            startTime = 0,
-            status = "Ready",
-            ignoreUntil = 0
-        }
     end
     
-    if any_reset then
-        os.execute("sleep 2") -- Beri waktu sistem kill
-    else
-        print(" [System] Clean. Starting...")
-        os.execute("sleep 1")
-    end
+    if not any_reset then buffer = buffer .. " [System] Clean. Starting...\r\n" end
+    
+    io.write("\027[H\027[2J" .. buffer)
+    io.stdout:flush()
+    
+    if any_reset then os.execute("sleep 2") else os.execute("sleep 1") end
 end
 
 -- ==========================================
--- MAIN MONITOR LOOP (DASHBOARD FIRST)
+-- MAIN MONITOR LOOP (TRAP SIGNAL)
 -- ==========================================
 function startMonitoring()
-    -- 1. Bersihkan sisa-sisa app lama
     cleanupAndPrepare()
     
-    -- 2. Setup Variable Kontrol
-    launch_queue_index = 1    -- Mulai dari app pertama
-    next_launch_time = os.time() -- Launch pertama langsung sekarang
-    
+    launch_queue_index = 1    
+    next_launch_time = os.time()
     local next_webhook_time = os.time() + 5 
     
-    clearScreen()
-    os.execute("stty sane >/dev/null 2>&1") 
-
     while true do
         local current_time = os.time()
         
-        -- A. RESET KURSOR (UI STABIL)
-        resetCursor()
-        
-        -- B. HEADER
-        local free_ram = getFreeRAM()
-        safe_print("========================================")
-        safe_print("     ZEEN TOOLS v7.0 (DASHBOARD FIRST)")
-        safe_print("========================================")
-        safe_print(string.format(" MONITORING    : %d/%d      |  FREE RAM : %s", #packages, #packages, free_ram))
-        safe_print("========================================")
-
-        -- C. LOGIC LAUNCHER (BACKGROUND)
-        -- Cek apakah masih ada antrian yang perlu di-launch
+        -- LOGIC UPDATE
         if launch_queue_index <= #packages then
-            -- Cek apakah sudah waktunya launch app ini
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
-                
-                -- Lakukan Launch (Tanpa Sleep panjang!)
                 modifyUGClonerPrefs(pkg.package, launch_queue_index, #packages)
                 killAndStart(pkg.package)
-                
-                -- Update Status Aplikasi ini
                 app_states[pkg.package].status = "Launched"
                 app_states[pkg.package].startTime = current_time
                 app_states[pkg.package].ignoreUntil = current_time + GRACE_PERIOD
-                
-                -- Set jadwal untuk app berikutnya
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
         end
 
-        -- D. LOOP STATUS APPS
+        -- RENDER BUFFER
+        local buffer = ""
+        local free_ram = getFreeRAM()
+        local current_monitor_idx = math.min(launch_queue_index, #packages)
+        if launch_queue_index > #packages then current_monitor_idx = #packages end
+
+        buffer = buffer .. "========================================\r\n"
+        buffer = buffer .. "     ZEEN TOOLS v7.2 (CTRL+C FIX)\r\n"
+        buffer = buffer .. "========================================\r\n"
+        buffer = buffer .. string.format(" MONITORING    : %d/%d      |  FREE RAM : %s\r\n", current_monitor_idx, #packages, free_ram)
+        buffer = buffer .. "========================================\r\n"
+
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "\027[1;30mUnknown\027[0m"
             
-            -- LOGIKA DISPLAY BERDASARKAN STATE
             if state.status == "Ready" then
-                -- Belum giliran launch
-                status_text = "\027[1;36mReady\027[0m" -- Cyan
-            
+                status_text = "\027[1;36mReady\027[0m" 
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
-                -- Sudah pernah di-launch, sekarang cek kondisinya
                 if current_time < state.ignoreUntil then
-                    -- Masih masa tenggang (Grace Period) -> Tampilkan Launched
                     local timeLeft = state.ignoreUntil - current_time
-                    status_text = string.format("\027[1;33mLaunched (%ds)\027[0m", timeLeft) -- Yellow
+                    status_text = string.format("\027[1;33mLaunched (%ds)\027[0m", timeLeft) 
                     state.status = "ALIVE"
                 else
-                    -- Masa tenggang habis, cek PID
-                    local pid, _, _ = getProcessInfo(pkg.package)
-                    if pid then
+                    local pid_out = exec("pidof " .. pkg.package)
+                    if pid_out ~= "" then
                         local duration = current_time - state.startTime
                         if duration < STABLE_TIME then status_text = "\027[1;32mLaunched\027[0m"
-                        else status_text = "\027[1;32mOnline\027[0m" end -- Green
+                        else status_text = "\027[1;32mOnline\027[0m" end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mRetrying...\027[0m" -- Red
+                        status_text = "\027[1;31mRetrying...\027[0m" 
                         state.status = "DEAD"
                     end
                 end
             end
 
-            -- LOGIKA RESTART (Jika status DEAD dan sudah melewati masa tunggu)
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
-                
                 if time_since_last_restart >= QUEUE_DELAY then
-                    -- Restart sekarang
                     killAndStart(pkg.package)
                     state.startTime = current_time
                     state.ignoreUntil = current_time + GRACE_PERIOD
                     state.status = "ALIVE"
                     global_last_restart = current_time
                 else
-                    -- Masih antri restart
                     local wait_left = QUEUE_DELAY - time_since_last_restart
                     status_text = string.format("\027[1;31mRetrying (%ds)\027[0m", wait_left)
                 end
             end
             
             local shortName = pkg.name:sub(1, 15)
-            -- Format Dashboard: [1] Nama : Status
-            io.write(string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text))
-            io.stdout:flush()
+            buffer = buffer .. string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text)
         end
         
-        safe_print("========================================")
-        safe_print(" [TEKAN 'q' LALU ENTER UNTUK KELUAR]    ")
+        buffer = buffer .. "========================================\r\n"
+        buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]   \027[K\r\n"
         
-        -- E. WEBHOOK
         if webhook_conf.url ~= "" and current_time >= next_webhook_time then
-            io.write("\027[K\r[Sending Webhook...]") 
-            io.stdout:flush()
+            buffer = buffer .. "[Sending Webhook...]\027[K\r"
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
         else
-            io.write("\027[K\r") 
+            buffer = buffer .. "\027[K\r" 
         end
         
-        -- F. INPUT CHECK (NON-BLOCKING)
-        local handle = io.popen("read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input")
-        local user_input = nil
-        if handle then
-            user_input = handle:read("*l")
-            handle:close()
-        end
+        io.write("\027[H" .. buffer) -- Render
+        io.stdout:flush()
         
-        if user_input and trim(user_input) == "q" then
-            hardExit()
-            break
+        -- INPUT CHECK DENGAN TRAP CTRL+C
+        -- Command shell ini menanam ranjau (Trap)
+        -- Jika CTRL+C (INT) ditekan, dia akan echo STOP_SIGNAL
+        local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
+        local handle = io.popen(cmd)
+        local output = handle:read("*a") -- Baca semua output
+        handle:close()
+        
+        -- Cek apakah output mengandung 'q' atau 'STOP_SIGNAL'
+        if output then
+            if output:match("STOP_SIGNAL") or output:match("^q") then
+                hardExit()
+                break
+            end
         end
     end
 end
@@ -486,11 +448,11 @@ end
 function menuSettings()
     while true do
         clearScreen()
-        safe_print("══ SETTINGS & EXTRAS ══")
-        safe_print("1. Set Delay Launch (Currently: " .. config.delay .. "s)")
-        safe_print("2. Set Private Server Link (VIP)")
-        safe_print("3. Set Discord Webhook")
-        safe_print("4. Kembali")
+        io.write("══ SETTINGS & EXTRAS ══\r\n")
+        io.write("1. Set Delay Launch (Currently: " .. config.delay .. "s)\r\n")
+        io.write("2. Set Private Server Link (VIP)\r\n")
+        io.write("3. Set Discord Webhook\r\n")
+        io.write("4. Kembali\r\n")
         
         local c = safe_input("Pilih: ")
         
@@ -498,12 +460,12 @@ function menuSettings()
             config.delay = tonumber(safe_input("Delay (detik): ")) or 10
             saveAll()
         elseif c == "2" then
-            safe_print("Masukkan Link VIP (Kosongkan untuk hapus):")
+            io.write("Masukkan Link VIP (Kosongkan untuk hapus):\r\n")
             vip_link = safe_input(">> ")
             saveAll()
         elseif c == "3" then
-            safe_print("1. Set URL")
-            safe_print("2. Set Interval (Detik)")
+            io.write("1. Set URL\r\n")
+            io.write("2. Set Interval (Detik)\r\n")
             local wc = safe_input(">> ")
             if wc == "1" then 
                 webhook_conf.url = safe_input("Webhook URL: ")
@@ -517,16 +479,16 @@ end
 
 function autoDetectRoblox()
     clearScreen()
-    safe_print("══ AUTO-DETECT ROBLOX ══")
+    io.write("══ AUTO-DETECT ROBLOX ══\r\n")
     local result = exec("pm list packages | grep 'roblox'")
     local detected = {}
     for line in result:gmatch("[^\r\n]+") do
         local pkg = line:match("package:(.+)")
         if pkg then table.insert(detected, pkg) end
     end
-    if #detected == 0 then safe_print("✗ Tidak ada Roblox."); safe_input("Tekan Enter..."); return end
+    if #detected == 0 then io.write("✗ Tidak ada Roblox.\r\n"); safe_input("Tekan Enter..."); return end
     
-    safe_print("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.")
+    io.write("✓ Ditemukan " .. #detected .. " packages. Ketik 'all' add.\r\n")
     if safe_input("Pilihan: ") == "all" then
         for _, pkg in ipairs(detected) do
             local exists = false
@@ -542,9 +504,6 @@ function autoDetectRoblox()
 end
 
 function launchAutoGrid()
-    -- LANGSUNG KE FUNGSI MONITORING
-    -- Launch logic dipindah ke dalam monitoring loop agar dashboard muncul duluan
-    
     local result = exec("wm size")
     local w, h = result:match("Physical size: (%d+)x(%d+)")
     if w then
@@ -558,8 +517,8 @@ function launchAutoGrid()
     end
 
     clearScreen()
-    safe_print("══ DASHBOARD LAUNCH ══")
-    if #packages == 0 then safe_print("✗ No packages!"); safe_input("Enter..."); return end
+    io.write("══ DASHBOARD LAUNCH ══\r\n")
+    if #packages == 0 then io.write("✗ No packages!\r\n"); safe_input("Enter..."); return end
     
     if safe_input("Start Monitoring? (y/n): ") ~= "y" then return end
     
@@ -572,13 +531,13 @@ function main()
     loadData()
     while true do
         clearScreen()
-        safe_print("ZEEN TOOLS v7.0 (DASHBOARD FIRST)")
-        safe_print("1. Start Auto Grid & Monitor")
-        safe_print("2. Detect Roblox")
-        safe_print("3. List Packages")
-        safe_print("4. Settings (VIP/Webhook)")
-        safe_print("5. Clear Data")
-        safe_print("6. Exit")
+        io.write("ZEEN TOOLS v7.2 (CTRL+C FIX)\r\n")
+        io.write("1. Start Auto Grid & Monitor\r\n")
+        io.write("2. Detect Roblox\r\n")
+        io.write("3. List Packages\r\n")
+        io.write("4. Settings (VIP/Webhook)\r\n")
+        io.write("5. Clear Data\r\n")
+        io.write("6. Exit\r\n")
         
         local choice = safe_input("Pilih: ")
         
@@ -586,11 +545,11 @@ function main()
         elseif choice == "2" then autoDetectRoblox()
         elseif choice == "3" then 
             clearScreen()
-            safe_print("=== LIST PACKAGES ===")
-            for i,p in ipairs(packages) do safe_print(i..". "..p.name) end 
+            io.write("=== LIST PACKAGES ===\r\n")
+            for i,p in ipairs(packages) do io.write(i..". "..p.name.."\r\n") end 
             safe_input("\nTekan Enter kembali...")
         elseif choice == "4" then menuSettings()
-        elseif choice == "5" then packages={}; saveAll(); safe_print("Cleared."); safe_input("Enter...")
+        elseif choice == "5" then packages={}; saveAll(); io.write("Cleared.\r\n"); safe_input("Enter...")
         elseif choice == "6" then 
             hardExit()
             break 
@@ -599,4 +558,8 @@ function main()
 end
 
 main()
+
+Logika Fix CTRL+C (Trap Signal):
+Saya mengubah bagian pembaca input (di bagian bawah loop monitoring) menjadi seperti ini:
+local cmd = "trap 'echo STOP_SIGNAL' INT; read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
 
