@@ -1,24 +1,29 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v5.6 (INPUT FIX)
+-- PROJECT ZEEN TOOLS v5.7 (SAFE MODE)
 -- ==========================================
--- Update v5.6:
--- [+] FORCE ECHO: Memunculkan ketikan keyboard
--- [+] AUTO REPAIR: Perbaikan otomatis saat start
+-- Update v5.7:
+-- [+] SAFE INPUT: Membersihkan input dari spasi hantu
+-- [+] TTY FIX: Memaksa tombol ENTER terbaca (icrnl)
+-- [+] FORCE ECHO: Agar ketikan selalu muncul
 -- ==========================================
 
--- 1. RESET TERMINAL & AKTIFKAN INPUT (ECHO)
-os.execute("stty sane") 
-os.execute("stty echo") -- Ini kuncinya agar huruf muncul
+-- 1. KONFIGURASI TERMINAL AGRESIF
+-- sane: normalkan semua
+-- echo: munculkan huruf
+-- onlcr: fix tangga (output new line -> carriage return)
+-- icrnl: fix enter (input carriage return -> new line)
+os.execute("stty sane echo onlcr icrnl")
 io.stdout:setvbuf("no")
 
 -- ==========================================
--- FUNGSI INPUT & DISPLAY (SANGAT AMAN)
+-- FUNGSI INPUT & DISPLAY (SAFE MODE)
 -- ==========================================
 
 function safe_print(str)
     str = tostring(str or "")
+    -- Kita gunakan \r\n manual untuk menjamin tampilan rapi
     io.write(str .. "\r\n")
     io.stdout:flush()
 end
@@ -26,23 +31,29 @@ end
 -- Override fungsi print
 print = safe_print
 
+-- Fungsi Trim untuk membersihkan input (Menghapus spasi/enter berlebih)
+function trim(s)
+   return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
+
 function safe_input(prompt)
-    -- Pastikan mode ECHO aktif sebelum meminta input
-    os.execute("stty echo") 
-    io.write("\027[?25h") -- Pastikan kursor muncul
+    -- Paksa mode normal setiap kali minta input
+    os.execute("stty sane echo onlcr icrnl")
     
     io.write(prompt)
     io.stdout:flush()
     
     local result = io.read()
     
-    -- Jika input kosong/error, kembalikan string kosong
     if not result then return "" end
-    return result
+    -- Bersihkan hasil input agar "1 " menjadi "1"
+    return trim(result)
 end
 
 function clearScreen()
-    os.execute("clear")
+    -- Gunakan printf untuk clear layar (lebih kompatibel dari os.execute clear)
+    io.write("\027[H\027[2J")
+    io.stdout:flush()
 end
 
 -- ==========================================
@@ -51,8 +62,6 @@ end
 local WATCHDOG_INTERVAL = 5
 local QUEUE_DELAY = 30
 local STABLE_TIME = 60
-
--- KONFIGURASI DEFAULT
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
 local DISPLAY_WIDTH = 1280 
@@ -245,7 +254,7 @@ function startMonitoring()
         io.write("\027[H") 
         
         safe_print("========================================")
-        safe_print("     ZEEN TOOLS v5.6 (ULTIMATE)")
+        safe_print("     ZEEN TOOLS v5.7 (SAFE MODE)")
         safe_print("========================================")
         safe_print(string.format(" Monitor : %d Apps    |    Queue: 30s", #packages))
         if vip_link ~= "" then safe_print(" VIP Link: ACTIVE (Direct Pkg)")
@@ -287,7 +296,6 @@ function startMonitoring()
             end
             
             local shortName = pkg.name:sub(1, 15)
-            -- Gunakan safe print untuk baris
             io.write(string.format("[%d] %-16s : %-20s\027[K\r\n", i, shortName, status_text))
             io.stdout:flush()
         end
@@ -449,7 +457,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        safe_print("ZEEN TOOLS v5.6 (INPUT FIX)")
+        safe_print("ZEEN TOOLS v5.7 (SAFE MODE)")
         safe_print("1. Start Auto Grid & Monitor")
         safe_print("2. Detect Roblox")
         safe_print("3. List Packages")
