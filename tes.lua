@@ -1,50 +1,18 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v9.5 (DETECTION FIX)
+-- PROJECT ZEEN TOOLS v9.6 (SELECTOR & VIP)
 -- ==========================================
--- Update v9.5:
--- [+] FIX TANGGA: Manual \r\n pada setiap print
--- [+] FIX DETECT: Scan packages via Root (/system/bin/pm)
--- [+] SELECTOR: Input "all" atau "1,2,3"
--- [+] COOKIE MGR: Integrasi kuki.lua full
+-- Update v9.6:
+-- [+] AUTO DETECT FIX: Parsing nama package lebih bersih
+-- [+] SELECTOR: Menu pilih 'all' atau '1,2,3'
+-- [+] GLOBAL VIP: Link otomatis untuk semua akun
+-- [+] STORAGE: Tetap di /sdcard/Zeen/
 -- ==========================================
 
 -- 1. SETUP TERMINAL TOTAL
-os.execute("stty sane cooked icrnl echo onlcr >/dev/null 2>&1") 
+os.execute("stty sane cooked icrnl echo >/dev/null 2>&1") 
 io.stdout:setvbuf("no")
-
--- ==========================================
--- FUNGSI DISPLAY & UI (ANTI-TANGGA)
--- ==========================================
-
-function safe_print(str)
-    str = tostring(str or "")
-    -- PAKSA \r (Carriage Return) di setiap baris
-    io.write(str .. "\027[K\r\n") 
-    io.stdout:flush()
-end
--- Override print bawaan agar tidak ada tangga
-print = safe_print
-
-function trim(s)
-   return (s:gsub("^%s*(.-)%s*$", "%1"))
-end
-
-function safe_input(prompt)
-    os.execute("stty sane cooked icrnl echo >/dev/null 2>&1")
-    io.stdout:flush()
-    io.write(prompt)
-    io.stdout:flush()
-    local result = io.read()
-    if not result then return "" end
-    return trim(result)
-end
-
-function clearScreen()
-    io.write("\027[H\027[2J") 
-    io.stdout:flush()
-end
 
 -- ==========================================
 -- KONFIGURASI PATH (SDCARD)
@@ -65,7 +33,7 @@ local TEMP_SCRIPT = CONFIG_DIR .. "/temp_cmd.sh"
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local ZEEN_VERSION = "v9.5"
+local ZEEN_VERSION = "v9.6"
 local WATCHDOG_INTERVAL = 2   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
@@ -91,8 +59,27 @@ local next_launch_time = 0
 local scan_pointer = 1 
 
 -- ==========================================
--- SYSTEM HELPERS
+-- FUNGSI UI & HELPER
 -- ==========================================
+
+function trim(s)
+   return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
+
+function safe_input(prompt)
+    os.execute("stty sane cooked icrnl echo >/dev/null 2>&1")
+    io.stdout:flush()
+    io.write(prompt)
+    io.stdout:flush()
+    local result = io.read()
+    if not result then return "" end
+    return trim(result)
+end
+
+function clearScreen()
+    io.write("\027[H\027[2J") 
+    io.stdout:flush()
+end
 
 function exec(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
@@ -100,7 +87,6 @@ function exec(cmd)
     f:write("#!/system/bin/sh\n" .. cmd .. "\n")
     f:close()
     os.execute("chmod +x " .. TEMP_SCRIPT .. " >/dev/null 2>&1")
-    -- Gunakan su -c agar command punya akses root penuh
     local handle = io.popen("su -c '" .. TEMP_SCRIPT .. "' 2>/dev/null")
     local result = handle:read("*a")
     handle:close()
@@ -108,7 +94,6 @@ function exec(cmd)
     return result or ""
 end
 
--- Eksekusi Mount Master (Khusus Database)
 function exec_root_mm(cmd)
     local f = io.open(TEMP_SCRIPT, "w")
     if not f then return "" end
@@ -118,7 +103,6 @@ function exec_root_mm(cmd)
     local handle = io.popen("su -mm -c '" .. TEMP_SCRIPT .. "' 2>/dev/null")
     local result = handle:read("*a")
     handle:close()
-    os.remove(TEMP_SCRIPT)
     return result or ""
 end
 
@@ -152,7 +136,6 @@ function fetch_roblox_identity(cookie)
     if not cookie or #cookie < 20 then return nil, nil end
     local url = "https://users.roblox.com/v1/users/authenticated"
     local safe_cookie = cookie:gsub("'", ""):gsub("[\r\n]", "")
-    -- User agent penting
     local cmd = string.format("curl -s -L --max-time 10 -A 'Mozilla/5.0 (Android 10; Mobile)' -H 'Cookie: .ROBLOSECURITY=%s' \"%s\"", safe_cookie, url)
     local handle = io.popen(cmd)
     local json = handle:read("*a")
@@ -166,17 +149,14 @@ function extract_package_cookie(package)
     local find_cmd = "find /data/data/" .. package .. " -name 'Cookies' 2>/dev/null | head -n 1"
     local db_path = exec_root_mm(find_cmd):gsub("%s+", "")
     if db_path == "" then return nil end
-    
     local temp_db = CONFIG_DIR .. "/temp_cookie.db"
     exec_root_mm("cp \"" .. db_path .. "\" " .. temp_db)
     exec_root_mm("chmod 777 " .. temp_db)
-    
     local query = "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY';"
     local sqlite_cmd = "sqlite3 " .. temp_db .. " \"" .. query .. "\""
     local handle = io.popen(sqlite_cmd)
     local raw_cookie = handle:read("*a")
     handle:close()
-    
     os.remove(temp_db)
     if raw_cookie and #raw_cookie > 20 then return raw_cookie:gsub("[\r\n]", "") end
     return nil
@@ -186,7 +166,6 @@ function inject_cookie_to_app(package, cookie_value)
     local find_cmd = "find /data/data/" .. package .. " -name 'Cookies' 2>/dev/null | head -n 1"
     local db_path = exec_root_mm(find_cmd):gsub("%s+", "")
     if db_path == "" then return false, "DB Not Found" end
-    
     local update_sql = string.format("UPDATE cookies SET value='%s' WHERE name='.ROBLOSECURITY';", cookie_value)
     local cmd = string.format("sqlite3 \"%s\" \"%s\"", db_path, update_sql)
     exec_root_mm(cmd)
@@ -349,6 +328,8 @@ end
 
 function killAndStart(package)
     exec("am force-stop " .. package .. " >/dev/null 2>&1")
+    
+    -- [GLOBAL VIP LINK] Berlaku untuk semua package jika diset
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
         local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s >/dev/null 2>&1", vip_link, package)
         exec(cmd)
@@ -470,6 +451,9 @@ function startMonitoring()
                 state.status = "Launched"
                 state.startTime = current_time
                 state.ignoreUntil = current_time + GRACE_PERIOD
+                state.strikes = 0
+                state.lastBytes = getNetworkBytes(state.uid)
+                state.netStatus = "Init"
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
@@ -663,10 +647,14 @@ function autoDetectRoblox()
     local raw_output = exec("/system/bin/pm list packages")
     
     local candidates = {}
+    -- Perbaikan: Membersihkan 'package:' di awal string
     for line in raw_output:gmatch("[^\r\n]+") do
         if line:lower():find("roblox") then
-            local pkg = line:match("package:(.+)") or line
-            if pkg then table.insert(candidates, pkg) end
+            -- Hapus prefix 'package:' dan spasi
+            local pkg = line:gsub("package:", ""):gsub("%s+", "")
+            if pkg and pkg ~= "" then 
+                table.insert(candidates, pkg) 
+            end
         end
     end
 
@@ -748,7 +736,7 @@ function main()
     loadData()
     while true do
         clearScreen()
-        print("ZEEN TOOLS v9.5 (DETECTION FIX)")
+        print("ZEEN TOOLS v9.6 (SELECTOR & VIP)")
         print("1. Start Auto Grid & Monitor")
         print("2. Detect Roblox (New)")
         print("3. List Packages")
