@@ -216,6 +216,11 @@ function checkAllHeartbeats()
         updateAppHeartbeat(pkg.package)
     end
 end
+
+-- ==========================================
+-- TRAFFIC MONITORING
+-- ==========================================
+function getAppUID(package)
     local cmd = "stat -c %u /data/data/" .. package
     local uid = exec(cmd):gsub("%s+", "")
     if uid and tonumber(uid) then return tonumber(uid) end
@@ -238,7 +243,7 @@ function getNetworkBytes(uid)
 end
 
 -- ==========================================
--- COOKIE MANAGER
+-- COOKIE & JSON UTILITIES
 -- ==========================================
 local function get_json_val(json, key)
     if not json then return nil end
@@ -260,6 +265,24 @@ function fetch_roblox_identity(cookie)
     local id = get_json_val(json, "id")
     local name = get_json_val(json, "name")
     return name, id
+end
+
+-- ==========================================
+-- AUTO DETECT COOKIES (CALLED AT START MONITORING)
+-- ==========================================
+function autoDetectCookiesOnStart()
+    local scan_count = 0
+    for i, pkg in ipairs(packages) do
+        local cookie = extract_package_cookie(pkg.package)
+        if cookie then
+            local username, id = fetch_roblox_identity(cookie)
+            if username then
+                pkg.username = username
+                scan_count = scan_count + 1
+            end
+        end
+    end
+    return scan_count
 end
 
 function extract_package_cookie(package)
@@ -451,11 +474,15 @@ function sendDiscordWebhook()
         end
         local status_icon = is_online and "🟢" or "🔴"
         local ram_val = (is_online and rss_kb) and string.format("%dMB", rss_kb) or "0MB"
-        local uname_display = pkg.username and string.format("(%s)", pkg.username) or ""
+        -- ==========================================
+        -- NEW FORMAT: **||username||** instead of (username)
+        -- ==========================================
+        local username_display = pkg.username and string.format("**||%s||**", pkg.username) or ""
         local field_val = string.format("`⏱️ %s | 💾 %s`", uptime, ram_val)
         if not is_online then field_val = "`🔻 OFFLINE`" end
         if state.status == "Ready" then field_val = "`⏳ QUEUE`" end
-        fields = fields .. string.format('{"name": "%s %s ||%s||", "value": "%s", "inline": false},', status_icon, pkg.name, uname_display, field_val)
+        -- NEW: Hanya tampilkan username saja, bukan package name
+        fields = fields .. string.format('{"name": "%s %s", "value": "%s", "inline": false},', status_icon, username_display, field_val)
     end
     fields = fields:sub(1, -2)
     local color = 65280 
@@ -520,6 +547,19 @@ end
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
+    
+    -- ==========================================
+    -- AUTO DETECT COOKIES SAAT START
+    -- ==========================================
+    clearScreen()
+    io.write("\027[H\027[2J")
+    print("════════════════════════════════════════")
+    print("   AUTO DETECTING COOKIES...")
+    print("════════════════════════════════════════")
+    local detected_count = autoDetectCookiesOnStart()
+    print(string.format("✓ Detected %d username(s) from cookies\n", detected_count))
+    os.execute("sleep 1")
+    
     launch_queue_index = 1    
     next_launch_time = os.time()
     scan_pointer = 1
@@ -666,19 +706,29 @@ function startMonitoring()
                     status_text = string.format("\027[1;31m%-10s\027[0m", str)
                 end
             end
-            local displayName = pkg.name
-            if pkg.username then
-                local shortPkg = pkg.name:sub(1, 8)
-                displayName = string.format("%s (%s)", shortPkg, pkg.username)
+            -- ==========================================
+            -- NEW FORMAT: package_name (username) or empty
+            -- ==========================================
+            local displayName = pkg.package
+            if pkg.username and pkg.username ~= "" then
+                displayName = string.format("%s (%s)", pkg.package, pkg.username)
+            else
+                displayName = pkg.package .. " ()"  -- Empty parentheses jika belum ada username
             end
-            displayName = displayName:sub(1, 25)
+            displayName = displayName:sub(1, 40)  -- Extended length untuk package_name
             -- ==========================================
             -- Display: NO | APP NAME | STATUS | CONNECTION
             -- ==========================================
-            buffer = buffer .. string.format("%s[%d] %-25s %-15s %s\r\n", pointer_char, i, displayName, status_text, connection_text)
+            buffer = buffer .. string.format("%s[%d] %-40s %-15s %s\r\n", pointer_char, i, displayName, status_text, connection_text)
         end
         buffer = buffer .. "==============================================\r\n"
         buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]         \027[K\r\n"
+        -- ==========================================
+        -- WEBHOOK NOTIFICATIONS (tetap ada)
+        -- - All Online: saat semua app ready
+        -- - Routine Update: setiap interval
+        -- - Crash/Disconnect: auto handled (line 661, 676)
+        -- ==========================================
         if all_launched and not initial_webhook_sent and webhook_conf.url ~= "" then
             buffer = buffer .. "[Sending All Online Webhook...]\027[K\r"
             sendDiscordWebhook()
