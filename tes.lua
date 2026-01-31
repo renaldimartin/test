@@ -122,18 +122,18 @@ function getFreeRAM()
         local content = f:read("*a")
         f:close()
         -- Cari 'MemAvailable:    123456 kB'
-        local mem_kb = content:match("MemAvailable:%s+(%d+)")
-        if mem_kb then
-            local gb = tonumber(mem_kb) / 1024 / 1024
+        local mem_kb = tonumber(content:match("MemAvailable:%s+(%d+)"))
+        if mem_kb and mem_kb > 0 then
+            local gb = mem_kb / 1024 / 1024
             return string.format("%.2f GB", gb)
         end
     end
 
     -- Metode 2: Fallback ke command line jika file tidak terbaca
     local output = exec("cat /proc/meminfo | grep MemAvailable")
-    local kb = output:match("(%d+)")
-    if kb then
-        local gb = tonumber(kb) / 1024 / 1024
+    local kb = tonumber(output:match("(%d+)"))
+    if kb and kb > 0 then
+        local gb = kb / 1024 / 1024
         return string.format("%.2f GB", gb)
     end
     return "Unknown"
@@ -320,14 +320,26 @@ function getProcessInfo(package)
 end
 
 function killAndStart(package)
-    -- Perintah kill langsung via su -c
-    exec("am force-stop " .. package)
+    -- STEP 1: Force stop dengan root
+    exec("su -c 'am force-stop " .. package .. "' 2>/dev/null")
+    os.execute("sleep 0.5")
     
+    -- STEP 2: Verifikasi dan double-kill jika masih berjalan
+    local pid_check = exec("pidof " .. package)
+    if pid_check and pid_check:gsub("%s+", "") ~= "" then
+        local uid = getAppUID(package)
+        if uid then
+            exec("su -c 'kill -9 -f $(pgrep -U " .. uid .. ")' 2>/dev/null")
+        end
+        os.execute("sleep 0.3")
+    end
+    
+    -- STEP 3: Launch app
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
-        local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s", vip_link, package)
+        local cmd = string.format("su -c 'am start -a android.intent.action.VIEW -d \"%s\" -p %s' 2>/dev/null", vip_link, package)
         exec(cmd)
     else
-        exec("am start " .. package)
+        exec("su -c 'am start " .. package .. "' 2>/dev/null")
     end
 end
 
