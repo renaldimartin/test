@@ -32,13 +32,24 @@ local VIP_FILE = CONFIG_DIR .. "/vip_link.txt"
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local ZEEN_VERSION = "v10.0"
+local ZEEN_VERSION = "v10.0 (HEARTBEAT+SOFT)"
 local WATCHDOG_INTERVAL = 2   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
 local STABLE_TIME = 60        
 local TRAFFIC_THRESHOLD = 100 
-local MAX_STRIKES = 5         
+local MAX_STRIKES = 5
+
+-- ==========================================
+-- HEARTBEAT CONFIGURATION
+-- ==========================================
+local HEARTBEAT_INTERVAL = 30      -- Check heartbeat setiap 30 detik
+local HEARTBEAT_TIMEOUT = 5        -- Timeout untuk HTTP request 5 detik
+local HEARTBEAT_MAX_RETRIES = 2    -- Max retry sebelum mark DISCONNECTED
+local HEARTBEAT_ENDPOINTS = {      -- Roblox heartbeat endpoints
+    "https://www.roblox.com",
+    "https://www.roblox.com/home"
+}         
 
 local STATUS_BAR_HEIGHT = 60
 local DEFAULT_DELAY = 10
@@ -140,9 +151,71 @@ function getFreeRAM()
 end
 
 -- ==========================================
--- TRAFFIC MONITORING
+-- HEARTBEAT DETECTION SYSTEM
 -- ==========================================
-function getAppUID(package)
+
+-- Fungsi untuk check heartbeat app
+function checkAppHeartbeat(package)
+    -- Pilih endpoint random dari list
+    local endpoint = HEARTBEAT_ENDPOINTS[math.random(1, #HEARTBEAT_ENDPOINTS)]
+    
+    -- Cek dengan curl via proxy dari app (simulate app accessing network)
+    local curl_cmd = string.format(
+        "timeout %d curl -s -m %d -w '%%{http_code}' '%s' 2>/dev/null | tail -c 3",
+        HEARTBEAT_TIMEOUT, HEARTBEAT_TIMEOUT, endpoint
+    )
+    
+    local result = exec(curl_cmd)
+    local http_code = tonumber(result) or 0
+    
+    -- Return true jika HTTP 200-299 (success)
+    return http_code >= 200 and http_code < 300
+end
+
+-- Fungsi untuk check app connectivity status
+function updateAppHeartbeat(package)
+    local state = app_states[package]
+    if not state then return false end
+    
+    -- Cek PID dulu
+    local pid_check = exec("pidof " .. package)
+    if not pid_check or pid_check:gsub("%s+", "") == "" then
+        state.heartbeatStatus = "DEAD"
+        state.connectionStatus = "Offline"
+        return false
+    end
+    
+    -- Jika PID exist, cek heartbeat
+    local hb_success = checkAppHeartbeat(package)
+    
+    if hb_success then
+        state.heartbeatStatus = "ALIVE"
+        state.connectionStatus = "Connected"
+        state.lastHeartbeat = os.time()
+        state.heartbeatRetries = 0
+        return true
+    else
+        -- Track retry
+        state.heartbeatRetries = (state.heartbeatRetries or 0) + 1
+        
+        if state.heartbeatRetries >= HEARTBEAT_MAX_RETRIES then
+            state.heartbeatStatus = "DEAD"
+            state.connectionStatus = "Disconnected"
+            return false
+        else
+            state.heartbeatStatus = "RETRYING"
+            state.connectionStatus = "Unstable"
+            return nil  -- Belum final decision
+        end
+    end
+end
+
+-- Fungsi untuk check semua app heartbeat
+function checkAllHeartbeats()
+    for _, pkg in ipairs(packages) do
+        updateAppHeartbeat(pkg.package)
+    end
+end
     local cmd = "stat -c %u /data/data/" .. package
     local uid = exec(cmd):gsub("%s+", "")
     if uid and tonumber(uid) then return tonumber(uid) end
@@ -418,14 +491,22 @@ function cleanupAndPrepare()
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
-            lastBytes = 0, strikes = 0, netStatus = "Init"
+            lastBytes = 0, strikes = 0, netStatus = "Init",
+            -- ==========================================
+            -- NEW: Heartbeat Tracking Fields
+            -- ==========================================
+            heartbeatStatus = "Init",           -- Init, ALIVE, DEAD, RETRYING
+            connectionStatus = "Offline",       -- Connected, Disconnected, Unstable
+            lastHeartbeat = 0,                  -- Timestamp last successful heartbeat
+            heartbeatRetries = 0,               -- Retry counter
+            monitorIndex = 0                    -- Current monitoring index
         }
         -- Cek PID
         local pid_out = exec("pidof " .. pkg.package)
         if pid_out and pid_out ~= "" then
             any_reset = true
             buffer = buffer .. string.format(" [Resetting] %s...\r\n", pkg.name)
-            exec("am force-stop " .. pkg.package) -- Direct exec, no null
+            exec("su -c 'am force-stop " .. pkg.package .. "' 2>/dev/null")
         end
     end
     if not any_reset then buffer = buffer .. " [System] Clean. Starting...\r\n" end
@@ -467,12 +548,25 @@ function startMonitoring()
         end
         scan_pointer = scan_pointer + 1
         if scan_pointer > #packages then scan_pointer = 1 end
+        
+        -- ==========================================
+        -- HEARTBEAT CHECK (Setiap WATCHDOG_INTERVAL)
+        -- ==========================================
+        if current_time % HEARTBEAT_INTERVAL == 0 then
+            checkAllHeartbeats()
+        end
+        
         local buffer = ""
         local free_ram = getFreeRAM()
-        local launched_count = 0
-        for _, pkg in ipairs(packages) do
-            if app_states[pkg.package].status ~= "Ready" then launched_count = launched_count + 1 end
-        end
+        
+        -- ==========================================
+        -- DYNAMIC LAUNCHED COUNTER
+        -- Counter berubah sesuai mana app yang sedang di-monitor
+        -- Jika monitoring app 1, launched = 1/6
+        -- Jika monitoring app 3, launched = 3/6, dst
+        -- ==========================================
+        local dynamic_launched = scan_pointer
+        
         buffer = buffer .. "\027[1;36m" 
         buffer = buffer .. "███████╗███████╗███████╗███╗   ██╗\r\n"
         buffer = buffer .. "╚══███╔╝██╔════╝██╔════╝████╗  ██║\r\n"
@@ -482,36 +576,78 @@ function startMonitoring()
         buffer = buffer .. "╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝\r\n"
         buffer = buffer .. "        ZEEN TOOLS versi ("..ZEEN_VERSION..")\027[0m\r\n"
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" LAUNCHED   : %d/%d     \r\n", launched_count, #packages)
+        -- Tampilkan dynamic launched counter berdasarkan scan_pointer
+        buffer = buffer .. string.format(" LAUNCHED   : %d/%d (Monitoring App #%d)\r\n", dynamic_launched, #packages, scan_pointer)
         buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
         buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" %-2s %-25s %-10s\r\n", "NO", "NAME (USER)", "STATUS")
+        buffer = buffer .. string.format(" %-2s %-25s %-15s %-12s\r\n", "NO", "NAME (USER)", "STATUS", "CONNECTION")
         buffer = buffer .. "----------------------------------------------\r\n"
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
-            local pointer_char = (i == scan_pointer) and ">" or " "
+            local connection_text = "Unknown"
+            local pointer_char = (i == scan_pointer) and "▶ " or "  "
             if state.status == "Ready" then
                 status_text = "\027[1;36mReady\027[0m     " 
+                connection_text = "\027[1;30mWait\027[0m     "
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
                     local str = string.format("Load (%ds)", timeLeft)
                     status_text = string.format("\027[1;33m%-10s\027[0m", str) 
                     state.status = "ALIVE"
+                    -- Durante grace period, connection unknown
+                    connection_text = "\027[1;33mWarmup\027[0m  "
                 else
                     local pid_out = exec("pidof " .. pkg.package)
                     if pid_out ~= "" then
                         local duration = current_time - state.startTime
-                        if duration < STABLE_TIME then status_text = "\027[1;32mLaunch    \027[0m"
-                        else status_text = "\027[1;32;1mOnline    \027[0m" end 
+                        if duration < STABLE_TIME then 
+                            status_text = "\027[1;32mLaunch\027[0m  "
+                            connection_text = "\027[1;33mWarmup\027[0m  "
+                        else 
+                            status_text = "\027[1;32;1mOnline\027[0m  "
+                            -- ==========================================
+                            -- NEW: Show heartbeat/connection status
+                            -- ==========================================
+                            if state.connectionStatus == "Connected" then
+                                connection_text = "\027[1;32m✓ Connected\027[0m"
+                            elseif state.connectionStatus == "Disconnected" then
+                                connection_text = "\027[1;31m✗ Disconnected\027[0m"
+                            elseif state.connectionStatus == "Unstable" then
+                                connection_text = "\027[1;33m⚠ Unstable\027[0m  "
+                            else
+                                connection_text = "\027[1;30mUnknown\027[0m   "
+                            end
+                        end 
                         state.status = "ALIVE"
                     else
-                        status_text = "\027[1;31mCrash     \027[0m" 
+                        status_text = "\027[1;31mCrash\027[0m   " 
+                        connection_text = "\027[1;31m✗ Offline\027[0m  "
                         state.status = "DEAD"
                     end
                 end
             end
+            
+            -- ==========================================
+            -- SOFT MONITORING: Handle disconnected app
+            -- ==========================================
+            if state.status == "ALIVE" and state.connectionStatus == "Disconnected" then
+                local time_since_last_restart = current_time - global_last_restart
+                if time_since_last_restart >= QUEUE_DELAY then
+                    -- Soft restart: hanya restart app yang disconnect
+                    killAndStart(pkg.package)
+                    state.startTime = current_time
+                    state.ignoreUntil = current_time + GRACE_PERIOD
+                    state.heartbeatRetries = 0
+                    global_last_restart = current_time
+                    
+                    if webhook_conf.url ~= "" then
+                        sendDiscordWebhook()
+                    end
+                end
+            end
+            
             if state.status == "DEAD" then
                 local time_since_last_restart = current_time - global_last_restart
                 if time_since_last_restart >= QUEUE_DELAY then
@@ -536,7 +672,10 @@ function startMonitoring()
                 displayName = string.format("%s (%s)", shortPkg, pkg.username)
             end
             displayName = displayName:sub(1, 25)
-            buffer = buffer .. string.format("%s[%d] %-25s %s\r\n", pointer_char, i, displayName, status_text)
+            -- ==========================================
+            -- Display: NO | APP NAME | STATUS | CONNECTION
+            -- ==========================================
+            buffer = buffer .. string.format("%s[%d] %-25s %-15s %s\r\n", pointer_char, i, displayName, status_text, connection_text)
         end
         buffer = buffer .. "==============================================\r\n"
         buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]         \027[K\r\n"
