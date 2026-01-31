@@ -4,7 +4,7 @@
 -- PROJECT ZEEN TOOLS v10.0 (EXECUTION FIX)
 -- ==========================================
 -- Update v10.0:
--- [+] FIX EXEC: Menggunakan direct su -c (Bypass Permission Error)
+-- [+] FIX EXEC: Menggunakan tsu (bukan su) untuk root access
 -- [+] FIX RAM: Membaca /proc/meminfo langsung (Native Lua)
 -- [+] FIX KILL: Force stop lebih agresif
 -- [+] STABLE UI: Dashboard & Input tetap aman
@@ -99,11 +99,51 @@ function clearScreen()
 end
 
 -- [CRITICAL FIX] FUNGSI EKSEKUSI LANGSUNG
--- Tidak lagi membuat file temp, langsung tembak ke su
+-- Menggunakan tsu untuk root access (bukan su)
+-- ==========================================
+-- ROOT EXECUTION (dari kuki.lua)
+-- ==========================================
+local function exec_root(cmd)
+    local safe_cmd = cmd:gsub("'", "'\\''")
+    local final_cmd = "su -mm -c '" .. safe_cmd .. "'"
+    local handle = io.popen(final_cmd)
+    local result = handle:read("*a")
+    handle:close()
+    return result
+end
+
+-- ==========================================
+-- JSON PARSER (dari kuki.lua)
+-- ==========================================
+local function get_json_val(json, key)
+    if not json then return nil end
+    local val = json:match('"' .. key .. '":%s-["%d]*(.-)["%d]*[,}]')
+    if val then return val:gsub('"', '') else return nil end
+end
+
+local function get_json_id(json)
+    if not json then return nil end
+    return json:match('"id":(%d+)')
+end
+
+-- ==========================================
+-- ROBLOX API CHECK (dari kuki.lua)
+-- ==========================================
+local function cek_api_roblox(cookie)
+    local url = "https://users.roblox.com/v1/users/authenticated"
+    local safe_cookie = cookie:gsub("'", "")
+    local cmd = string.format("curl -s -L --max-time 15 -A 'Mozilla/5.0 (Android 10; Mobile; rv:90.0) Gecko/90.0 Firefox/90.0' -H 'Cookie: .ROBLOSECURITY=%s' \"%s\"", safe_cookie, url)
+    
+    local handle = io.popen(cmd)
+    local json = handle:read("*a")
+    handle:close()
+    return json
+end
+
 function exec(cmd)
-    -- Escape double quotes untuk keamanan di dalam string su -c "..."
+    -- Escape double quotes untuk keamanan di dalam string tsu "..."
     local safe_cmd = cmd:gsub('"', '\\"')
-    local handle = io.popen('su -c "' .. safe_cmd .. '" 2>/dev/null')
+    local handle = io.popen('tsu "' .. safe_cmd .. '" 2>/dev/null')
     if not handle then return "" end
     local result = handle:read("*a")
     handle:close()
@@ -112,7 +152,7 @@ end
 
 function exec_root_mm(cmd)
     local safe_cmd = cmd:gsub('"', '\\"')
-    local handle = io.popen('su -mm -c "' .. safe_cmd .. '" 2>/dev/null')
+    local handle = io.popen('tsu -mm "' .. safe_cmd .. '" 2>/dev/null')
     if not handle then return "" end
     local result = handle:read("*a")
     handle:close()
@@ -253,52 +293,92 @@ end
 
 function fetch_roblox_identity(cookie)
     if not cookie or #cookie < 20 then return nil, nil end
-    local url = "https://users.roblox.com/v1/users/authenticated"
-    local safe_cookie = cookie:gsub("'", ""):gsub("[\r\n]", "")
-    local cmd = string.format("curl -s -L --max-time 10 -A 'Mozilla/5.0 (Android 10; Mobile)' -H 'Cookie: .ROBLOSECURITY=%s' \"%s\"", safe_cookie, url)
     
-    -- Curl dijalankan biasa (user) atau root jika perlu
-    local handle = io.popen(cmd)
-    local json = handle:read("*a")
-    handle:close()
+    -- Gunakan function cek_api_roblox dari kuki.lua
+    local json = cek_api_roblox(cookie)
     
-    local id = get_json_val(json, "id")
+    if not json or json == "" then
+        return nil, nil
+    end
+    
+    -- Parse JSON response
+    local id = get_json_id(json)
     local name = get_json_val(json, "name")
+    
     return name, id
 end
 
 -- ==========================================
 -- AUTO DETECT COOKIES (CALLED AT START MONITORING)
+-- Dengan graceful handling jika cookies tidak ada
 -- ==========================================
 function autoDetectCookiesOnStart()
     local scan_count = 0
+    
+    -- Scan packages yang sudah dalam list
     for i, pkg in ipairs(packages) do
         local cookie = extract_package_cookie(pkg.package)
+        
         if cookie then
             local username, id = fetch_roblox_identity(cookie)
-            if username then
+            if username and username ~= "" then
                 pkg.username = username
                 scan_count = scan_count + 1
             end
         end
     end
+    
     return scan_count
+end
 end
 
 function extract_package_cookie(package)
+    -- Cari DB dengan command yang sama seperti kuki.lua
     local find_cmd = "find /data/data/" .. package .. " -name 'Cookies' 2>/dev/null | head -n 1"
-    local db_path = exec_root_mm(find_cmd):gsub("%s+", "")
-    if db_path == "" then return nil end
-    local temp_db = CONFIG_DIR .. "/temp_cookie.db"
-    exec_root_mm("cp \"" .. db_path .. "\" " .. temp_db)
-    exec_root_mm("chmod 777 " .. temp_db)
+    local db_path = exec_root(find_cmd):gsub("%s+", "")
+    
+    if db_path == "" then 
+        return nil 
+    end
+    
+    -- Extract ke temp DB
+    local temp_db = CONFIG_DIR .. "/temp_cookie_" .. package:match("[^.]+$") .. ".db"
+    exec_root("cp \"" .. db_path .. "\" " .. temp_db .. " 2>/dev/null")
+    exec_root("chmod 777 " .. temp_db .. " 2>/dev/null")
+    
+    -- Query cookies dari SQLite
     local query = "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY';"
     local sqlite_cmd = "sqlite3 " .. temp_db .. " \"" .. query .. "\""
-    local handle = io.popen("su -c '" .. sqlite_cmd .. "'")
+    
+    local handle = io.popen(sqlite_cmd)
+    local raw_cookie = handle:read("*a")
+    handle:close()
+    
+    -- Clean cookie: hapus newlines, keep spaces (dari kuki.lua)
+    if raw_cookie and #raw_cookie > 20 then
+        local clean_cookie = raw_cookie:gsub("[\r\n]", "")
+        
+        -- Cleanup temp DB
+        os.execute("rm " .. temp_db .. " 2>/dev/null")
+        
+        return clean_cookie
+    end
+    
+    -- Cleanup temp DB
+    os.execute("rm " .. temp_db .. " 2>/dev/null")
+    return nil
+end
+    
+    local query = "SELECT value FROM cookies WHERE name = '.ROBLOSECURITY';"
+    local sqlite_cmd = "sqlite3 " .. temp_db .. " \"" .. query .. "\""
+    local handle = io.popen("tsu '" .. sqlite_cmd .. "'")
     local raw_cookie = handle:read("*a")
     handle:close()
     os.remove(temp_db)
-    if raw_cookie and #raw_cookie > 20 then return raw_cookie:gsub("[\r\n]", "") end
+    
+    if raw_cookie and #raw_cookie > 20 then 
+        return raw_cookie:gsub("[\r\n]", "") 
+    end
     return nil
 end
 
@@ -417,7 +497,7 @@ end
 
 function killAndStart(package)
     -- STEP 1: Force stop dengan root
-    exec("su -c 'am force-stop " .. package .. "' 2>/dev/null")
+    exec("tsu 'am force-stop " .. package .. "' 2>/dev/null")
     os.execute("sleep 0.5")
     
     -- STEP 2: Verifikasi dan double-kill jika masih berjalan
@@ -425,17 +505,17 @@ function killAndStart(package)
     if pid_check and pid_check:gsub("%s+", "") ~= "" then
         local uid = getAppUID(package)
         if uid then
-            exec("su -c 'kill -9 -f $(pgrep -U " .. uid .. ")' 2>/dev/null")
+            exec("tsu 'kill -9 -f $(pgrep -U " .. uid .. ")' 2>/dev/null")
         end
         os.execute("sleep 0.3")
     end
     
     -- STEP 3: Launch app
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
-        local cmd = string.format("su -c 'am start -a android.intent.action.VIEW -d \"%s\" -p %s' 2>/dev/null", vip_link, package)
+        local cmd = string.format("tsu 'am start -a android.intent.action.VIEW -d \"%s\" -p %s' 2>/dev/null", vip_link, package)
         exec(cmd)
     else
-        exec("su -c 'am start " .. package .. "' 2>/dev/null")
+        exec("tsu 'am start " .. package .. "' 2>/dev/null")
     end
 end
 
@@ -533,7 +613,7 @@ function cleanupAndPrepare()
         if pid_out and pid_out ~= "" then
             any_reset = true
             buffer = buffer .. string.format(" [Resetting] %s...\r\n", pkg.name)
-            exec("su -c 'am force-stop " .. pkg.package .. "' 2>/dev/null")
+            exec("tsu 'am force-stop " .. pkg.package .. "' 2>/dev/null")
         end
     end
     if not any_reset then buffer = buffer .. " [System] Clean. Starting...\r\n" end
@@ -607,21 +687,21 @@ function startMonitoring()
         -- ==========================================
         local dynamic_launched = scan_pointer
         
-        buffer = buffer .. "\027[1;36m" 
-        buffer = buffer .. "███████╗███████╗███████╗███╗   ██╗\r\n"
-        buffer = buffer .. "╚══███╔╝██╔════╝██╔════╝████╗  ██║\r\n"
-        buffer = buffer .. "  ███╔╝ █████╗  █████╗  ██╔██╗ ██║\r\n"
-        buffer = buffer .. " ███╔╝  ██╔══╝  ██╔══╝  ██║╚██╗██║\r\n"
-        buffer = buffer .. "███████╗███████╗███████╗██║ ╚████║\r\n"
-        buffer = buffer .. "╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝\r\n"
-        buffer = buffer .. "        ZEEN TOOLS versi ("..ZEEN_VERSION..")\027[0m\r\n"
-        buffer = buffer .. "==============================================\r\n"
-        -- Tampilkan dynamic launched counter berdasarkan scan_pointer
-        buffer = buffer .. string.format(" LAUNCHED   : %d/%d (Monitoring App #%d)\r\n", dynamic_launched, #packages, scan_pointer)
-        buffer = buffer .. string.format(" FREE RAM   : %s\r\n", free_ram)
-        buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. string.format(" %-2s %-25s %-15s %-12s\r\n", "NO", "NAME (USER)", "STATUS", "CONNECTION")
-        buffer = buffer .. "----------------------------------------------\r\n"
+        -- ==========================================
+        -- DASHBOARD HEADER - CLEAN & ORGANIZED
+        -- ==========================================
+        buffer = buffer .. "\027[1;36m╔════════════════════════════════════════════╗\027[0m\r\n"
+        buffer = buffer .. "\027[1;36m║  ZEEN TOOLS v10.0 - MONITORING DASHBOARD   ║\027[0m\r\n"
+        buffer = buffer .. "\027[1;36m╚════════════════════════════════════════════╝\027[0m\r\n"
+        buffer = buffer .. "\r\n"
+        -- Status info
+        buffer = buffer .. string.format("  Status:   LAUNCHED %d/%d (Monitoring App #%d)\r\n", dynamic_launched, #packages, scan_pointer)
+        buffer = buffer .. string.format("  RAM:      %s\r\n", free_ram)
+        buffer = buffer .. "\r\n"
+        -- Table header
+        buffer = buffer .. "\027[1;33m┌───┬──────────────────────────┬─────────────┬──────────────┐\027[0m\r\n"
+        buffer = buffer .. "\027[1;33m│ NO│ PACKAGE NAME             │   STATUS    │ CONNECTION   │\027[0m\r\n"
+        buffer = buffer .. "\027[1;33m├───┼──────────────────────────┼─────────────┼──────────────┤\027[0m\r\n"
         for i, pkg in ipairs(packages) do
             local state = app_states[pkg.package]
             local status_text = "Unknown"
@@ -708,34 +788,38 @@ function startMonitoring()
             end
             -- ==========================================
             -- NEW FORMAT: package_name (username) or empty
+            -- Shorten nama untuk fit dalam table
             -- ==========================================
-            local displayName = pkg.package
+            local displayName = pkg.package:sub(1, 22)  -- Shorten untuk fit
             if pkg.username and pkg.username ~= "" then
-                displayName = string.format("%s (%s)", pkg.package, pkg.username)
+                displayName = string.format("%s (%s)", pkg.package:sub(1, 18), pkg.username:sub(1, 3))
             else
-                displayName = pkg.package .. " ()"  -- Empty parentheses jika belum ada username
+                displayName = pkg.package:sub(1, 22)
             end
-            displayName = displayName:sub(1, 40)  -- Extended length untuk package_name
-            -- ==========================================
-            -- Display: NO | APP NAME | STATUS | CONNECTION
-            -- ==========================================
-            buffer = buffer .. string.format("%s[%d] %-40s %-15s %s\r\n", pointer_char, i, displayName, status_text, connection_text)
+            
+            -- Format row dengan table borders
+            local table_row = string.format("│ %2d│ %-24s │ %-11s │ %-12s │\r\n", 
+                i, displayName, status_text, connection_text)
+            buffer = buffer .. table_row
         end
-        buffer = buffer .. "==============================================\r\n"
-        buffer = buffer .. " [TEKAN 'q' ATAU CTRL+C UNTUK KELUAR]         \027[K\r\n"
+        
+        -- Table footer
+        buffer = buffer .. "\027[1;33m└───┴──────────────────────────┴─────────────┴──────────────┘\027[0m\r\n"
+        buffer = buffer .. "\r\n"
+        buffer = buffer .. " [TEKAN 'q' UNTUK KELUAR]"
         -- ==========================================
         -- WEBHOOK NOTIFICATIONS (tetap ada)
         -- - All Online: saat semua app ready
         -- - Routine Update: setiap interval
-        -- - Crash/Disconnect: auto handled (line 661, 676)
+        -- - Crash/Disconnect: auto handled
         -- ==========================================
         if all_launched and not initial_webhook_sent and webhook_conf.url ~= "" then
-            buffer = buffer .. "[Sending All Online Webhook...]\027[K\r"
+            buffer = buffer .. " | [Sending Webhook...]\027[K\r\n"
             sendDiscordWebhook()
             initial_webhook_sent = true
             next_webhook_time = current_time + webhook_conf.interval
         elseif initial_webhook_sent and webhook_conf.url ~= "" and current_time >= next_webhook_time then
-            buffer = buffer .. "[Sending Routine Webhook...]\027[K\r"
+            buffer = buffer .. " | [Routine Update...]\027[K\r\n"
             sendDiscordWebhook()
             next_webhook_time = current_time + webhook_conf.interval
         else
@@ -935,15 +1019,24 @@ function main()
     loadData()
     while true do
         clearScreen()
-        print("ZEEN TOOLS v10.0 (EXECUTION FIX)")
-        print("1. Start Auto Grid & Monitor")
-        print("2. Detect Roblox (New)")
-        print("3. List Packages")
-        print("4. Settings (VIP/Webhook)")
-        print("5. Cookie Manager")
-        print("6. Clear Data")
-        print("7. Exit")
-        
+        -- ==========================================
+        -- MENU FORMAT RAPI - RATA KIRI
+        -- ==========================================
+        print("╔════════════════════════════════════════╗")
+        print("║    ZEEN TOOLS v10.0 (HEARTBEAT+SOFT)  ║")
+        print("╚════════════════════════════════════════╝")
+        print("")
+        print("MAIN MENU:")
+        print("")
+        print("  1. Start Auto Grid & Monitor")
+        print("  2. Detect Roblox Apps")
+        print("  3. List Packages")
+        print("  4. Settings (VIP/Webhook)")
+        print("  5. Cookie Manager")
+        print("  6. Clear Data")
+        print("  7. Exit")
+        print("")
+        print("════════════════════════════════════════")
         io.write("Pilih: ")
         local choice = safe_input("")
         
@@ -951,12 +1044,37 @@ function main()
         elseif choice == "2" then autoDetectRoblox()
         elseif choice == "3" then 
             clearScreen()
-            print("=== LIST PACKAGES ===")
-            for i,p in ipairs(packages) do print(i..". "..p.name.."\r\n") end 
-            safe_input("\nTekan Enter kembali...")
+            print("╔════════════════════════════════════════╗")
+            print("║         LIST PACKAGES                  ║")
+            print("╚════════════════════════════════════════╝")
+            print("")
+            if #packages == 0 then
+                print("  (Belum ada package)")
+            else
+                for i,p in ipairs(packages) do 
+                    print(string.format("  %d. %s", i, p.name))
+                end
+            end
+            print("")
+            safe_input("Tekan Enter kembali...")
         elseif choice == "4" then menuSettings()
         elseif choice == "5" then menuCookieManager()
-        elseif choice == "6" then packages={}; saveAll(); print("Cleared."); safe_input("Enter...")
+        elseif choice == "6" then 
+            clearScreen()
+            print("╔════════════════════════════════════════╗")
+            print("║         CLEAR DATA                     ║")
+            print("╚════════════════════════════════════════╝")
+            print("")
+            print("  Yakin hapus semua packages? (y/n): ")
+            if safe_input("") == "y" then
+                packages={}
+                saveAll()
+                print("  ✓ Data cleared!")
+                os.execute("sleep 1")
+            else
+                print("  ✗ Cancelled")
+                os.execute("sleep 1")
+            end
         elseif choice == "7" then 
             hardExit()
             break 
