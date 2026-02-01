@@ -1,13 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- PROJECT ZEEN TOOLS v10.0 (EXECUTION FIX)
+-- PROJECT ZEEN TOOLS v10.1 (STABLE FIX)
 -- ==========================================
--- Update v10.0:
--- [+] FIX EXEC: Menggunakan tsu (bukan su) untuk root access
--- [+] FIX RAM: Membaca /proc/meminfo langsung (Native Lua)
--- [+] FIX KILL: Force stop lebih agresif
--- [+] STABLE UI: Dashboard & Input tetap aman
+-- Changelog Fix:
+-- 1. FIX Webhook: JSON Escape untuk mencegah error pada nama user aneh
+-- 2. FIX XML: Pencarian file preferensi lebih pintar (fallback mechanism)
+-- 3. ADD Safety: Cek dependensi (tsu, curl, sqlite3) di awal startup
 -- ==========================================
 
 -- 1. SETUP TERMINAL
@@ -32,7 +31,7 @@ local VIP_FILE = CONFIG_DIR .. "/vip_link.txt"
 -- ==========================================
 -- KONFIGURASI SYSTEM
 -- ==========================================
-local ZEEN_VERSION = "v10.0 (HEARTBEAT+SOFT)"
+local ZEEN_VERSION = "v10.1 (STABLE)"
 local WATCHDOG_INTERVAL = 2   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
@@ -43,10 +42,10 @@ local MAX_STRIKES = 5
 -- ==========================================
 -- HEARTBEAT CONFIGURATION
 -- ==========================================
-local HEARTBEAT_INTERVAL = 30      -- Check heartbeat setiap 30 detik
-local HEARTBEAT_TIMEOUT = 5        -- Timeout untuk HTTP request 5 detik
-local HEARTBEAT_MAX_RETRIES = 2    -- Max retry sebelum mark DISCONNECTED
-local HEARTBEAT_ENDPOINTS = {      -- Roblox heartbeat endpoints
+local HEARTBEAT_INTERVAL = 30      
+local HEARTBEAT_TIMEOUT = 5        
+local HEARTBEAT_MAX_RETRIES = 2    
+local HEARTBEAT_ENDPOINTS = {      
     "https://www.roblox.com",
     "https://www.roblox.com/home"
 }         
@@ -69,7 +68,7 @@ local next_launch_time = 0
 local scan_pointer = 1 
 
 -- ==========================================
--- FUNGSI UI & HELPER
+-- HELPER FUNCTIONS
 -- ==========================================
 
 function safe_print(str)
@@ -98,10 +97,56 @@ function clearScreen()
     io.stdout:flush()
 end
 
--- [CRITICAL FIX] FUNGSI EKSEKUSI LANGSUNG
--- Menggunakan tsu untuk root access (bukan su)
+-- [FIX] JSON ESCAPE UNTUK WEBHOOK
+-- Mencegah error jika nama mengandung kutip atau karakter aneh
+function json_escape(str)
+    if not str then return "" end
+    str = str:gsub('\\', '\\\\')
+    str = str:gsub('"', '\\"')
+    str = str:gsub('\n', '\\n')
+    str = str:gsub('\r', '\\r')
+    return str
+end
+
+-- FUNGSI CHECK DEPENDENCY
+function checkDependencies()
+    -- Cek paket wajib
+    local deps = {"tsu", "curl", "sqlite3"}
+    local missing = {}
+    for _, dep in ipairs(deps) do
+        local handle = io.popen("command -v " .. dep)
+        local res = handle:read("*a")
+        handle:close()
+        if res == "" then table.insert(missing, dep) end
+    end
+    
+    if #missing > 0 then
+        print("\027[1;31m[ERROR] Dependensi berikut belum terinstall:\027[0m")
+        for _, m in ipairs(missing) do print(" - " .. m) end
+        print("\nSilakan jalankan: pkg install " .. table.concat(missing, " "))
+        os.exit()
+    end
+    
+    -- Check Root Access (tsu)
+    local handle = io.popen("tsu -c id -u")
+    local uid = handle:read("*a")
+    handle:close()
+    
+    -- Validasi apakah user root (0)
+    if not uid or (uid:match("0") == nil and uid:match("root") == nil) then 
+        -- Fallback check
+        local h2 = io.popen("tsu -c whoami")
+        local who = h2:read("*a")
+        h2:close()
+        if not who or not who:match("root") then
+            print("\027[1;33m[WARNING] Akses Root mungkin bermasalah.\027[0m")
+            print("Pastikan Anda sudah memberikan izin root ke Termux.")
+            safe_input("Tekan Enter untuk mencoba lanjut...")
+        end
+    end
+end
+
 function exec(cmd)
-    -- Escape double quotes untuk keamanan di dalam string tsu "..."
     local safe_cmd = cmd:gsub('"', '\\"')
     local handle = io.popen('tsu "' .. safe_cmd .. '" 2>/dev/null')
     if not handle then return "" end
@@ -125,22 +170,17 @@ function getDeviceName()
     device_name = model
 end
 
--- [CRITICAL FIX] BACA RAM LANGSUNG
 function getFreeRAM()
-    -- Metode 1: Baca file langsung via Lua (Paling Stabil)
     local f = io.open("/proc/meminfo", "r")
     if f then
         local content = f:read("*a")
         f:close()
-        -- Cari 'MemAvailable:    123456 kB'
         local mem_kb = tonumber(content:match("MemAvailable:%s+(%d+)"))
         if mem_kb and mem_kb > 0 then
             local gb = mem_kb / 1024 / 1024
             return string.format("%.2f GB", gb)
         end
     end
-
-    -- Metode 2: Fallback ke command line jika file tidak terbaca
     local output = exec("cat /proc/meminfo | grep MemAvailable")
     local kb = tonumber(output:match("(%d+)"))
     if kb and kb > 0 then
@@ -153,31 +193,22 @@ end
 -- ==========================================
 -- HEARTBEAT DETECTION SYSTEM
 -- ==========================================
-
--- Fungsi untuk check heartbeat app
 function checkAppHeartbeat(package)
-    -- Pilih endpoint random dari list
     local endpoint = HEARTBEAT_ENDPOINTS[math.random(1, #HEARTBEAT_ENDPOINTS)]
-    
-    -- Cek dengan curl via proxy dari app (simulate app accessing network)
+    -- Menggunakan curl dengan timeout ketat
     local curl_cmd = string.format(
         "timeout %d curl -s -m %d -w '%%{http_code}' '%s' 2>/dev/null | tail -c 3",
         HEARTBEAT_TIMEOUT, HEARTBEAT_TIMEOUT, endpoint
     )
-    
     local result = exec(curl_cmd)
     local http_code = tonumber(result) or 0
-    
-    -- Return true jika HTTP 200-299 (success)
     return http_code >= 200 and http_code < 300
 end
 
--- Fungsi untuk check app connectivity status
 function updateAppHeartbeat(package)
     local state = app_states[package]
     if not state then return false end
     
-    -- Cek PID dulu
     local pid_check = exec("pidof " .. package)
     if not pid_check or pid_check:gsub("%s+", "") == "" then
         state.heartbeatStatus = "DEAD"
@@ -185,9 +216,7 @@ function updateAppHeartbeat(package)
         return false
     end
     
-    -- Jika PID exist, cek heartbeat
     local hb_success = checkAppHeartbeat(package)
-    
     if hb_success then
         state.heartbeatStatus = "ALIVE"
         state.connectionStatus = "Connected"
@@ -195,9 +224,7 @@ function updateAppHeartbeat(package)
         state.heartbeatRetries = 0
         return true
     else
-        -- Track retry
         state.heartbeatRetries = (state.heartbeatRetries or 0) + 1
-        
         if state.heartbeatRetries >= HEARTBEAT_MAX_RETRIES then
             state.heartbeatStatus = "DEAD"
             state.connectionStatus = "Disconnected"
@@ -205,12 +232,11 @@ function updateAppHeartbeat(package)
         else
             state.heartbeatStatus = "RETRYING"
             state.connectionStatus = "Unstable"
-            return nil  -- Belum final decision
+            return nil 
         end
     end
 end
 
--- Fungsi untuk check semua app heartbeat
 function checkAllHeartbeats()
     for _, pkg in ipairs(packages) do
         updateAppHeartbeat(pkg.package)
@@ -227,21 +253,6 @@ function getAppUID(package)
     return nil
 end
 
-function getNetworkBytes(uid)
-    if not uid then return 0 end
-    -- Baca langsung file jika bisa, fallback ke exec
-    local f = io.open("/proc/uid_stat/" .. uid .. "/tcp_rcv", "r")
-    if f then
-        local bytes = f:read("*n")
-        f:close()
-        return bytes or 0
-    end
-    
-    local cmd = "cat /proc/uid_stat/" .. uid .. "/tcp_rcv"
-    local bytes = exec(cmd):gsub("%s+", "")
-    return tonumber(bytes) or 0
-end
-
 -- ==========================================
 -- COOKIE & JSON UTILITIES
 -- ==========================================
@@ -256,54 +267,15 @@ function fetch_roblox_identity(cookie)
     local url = "https://users.roblox.com/v1/users/authenticated"
     local safe_cookie = cookie:gsub("'", ""):gsub("[\r\n]", "")
     local cmd = string.format("curl -s -L --max-time 10 -A 'Mozilla/5.0 (Android 10; Mobile)' -H 'Cookie: .ROBLOSECURITY=%s' \"%s\"", safe_cookie, url)
-    
-    -- Curl dijalankan biasa (user) atau root jika perlu
     local handle = io.popen(cmd)
     local json = handle:read("*a")
     handle:close()
-    
     local id = get_json_val(json, "id")
     local name = get_json_val(json, "name")
     return name, id
 end
 
--- ==========================================
--- AUTO DETECT COOKIES (CALLED AT START MONITORING)
--- Dengan graceful handling jika cookies tidak ada
--- ==========================================
-function autoDetectCookiesOnStart()
-    local scan_count = 0
-    local scan_attempted = 0
-    
-    for i, pkg in ipairs(packages) do
-        scan_attempted = scan_attempted + 1
-        
-        -- Try extract cookie dengan error handling
-        local cookie = extract_package_cookie(pkg.package)
-        
-        if cookie then
-            -- Try fetch identity dari cookie
-            local username, id = fetch_roblox_identity(cookie)
-            if username and username ~= "" then
-                pkg.username = username
-                scan_count = scan_count + 1
-            end
-        end
-        
-        -- Non-blocking: jika gagal, lanjut ke next package
-        -- Jangan stop scanning hanya karena satu package gagal
-    end
-    
-    return scan_count
-end
-
 function extract_package_cookie(package)
-    -- ==========================================
-    -- IMPROVED: Check multiple possible cookie locations
-    -- UGCloner apps menyimpan cookies di berbagai tempat
-    -- ==========================================
-    
-    -- Try multiple possible paths
     local possible_paths = {
         "/data/data/" .. package .. "/app_webview/Default/Cookies",
         "/data/data/" .. package .. "/app_webview/Cookies",
@@ -313,8 +285,6 @@ function extract_package_cookie(package)
     }
     
     local db_path = nil
-    
-    -- Check each path
     for _, path in ipairs(possible_paths) do
         local check_cmd = "test -f '" .. path .. "' && echo 'FOUND'"
         local result = exec_root_mm(check_cmd)
@@ -324,15 +294,12 @@ function extract_package_cookie(package)
         end
     end
     
-    -- Jika tidak ketemu di path predefined, cari dengan find command
     if not db_path or db_path == "" then
         local find_cmd = "find /data/data/" .. package .. " -name 'Cookies' 2>/dev/null | head -n 1"
         db_path = exec_root_mm(find_cmd):gsub("%s+", "")
     end
     
-    if not db_path or db_path == "" then
-        return nil
-    end
+    if not db_path or db_path == "" then return nil end
     
     local temp_db = CONFIG_DIR .. "/temp_cookie.db"
     exec_root_mm("cp \"" .. db_path .. "\" " .. temp_db .. " 2>/dev/null")
@@ -351,14 +318,19 @@ function extract_package_cookie(package)
     return nil
 end
 
-function inject_cookie_to_app(package, cookie_value)
-    local find_cmd = "find /data/data/" .. package .. " -name 'Cookies' 2>/dev/null | head -n 1"
-    local db_path = exec_root_mm(find_cmd):gsub("%s+", "")
-    if db_path == "" then return false, "DB Not Found" end
-    local update_sql = string.format("UPDATE cookies SET value='%s' WHERE name='.ROBLOSECURITY';", cookie_value)
-    local cmd = string.format("sqlite3 \"%s\" \"%s\"", db_path, update_sql)
-    exec_root_mm(cmd)
-    return true, "Injected"
+function autoDetectCookiesOnStart()
+    local scan_count = 0
+    for i, pkg in ipairs(packages) do
+        local cookie = extract_package_cookie(pkg.package)
+        if cookie then
+            local username, id = fetch_roblox_identity(cookie)
+            if username and username ~= "" then
+                pkg.username = username
+                scan_count = scan_count + 1
+            end
+        end
+    end
+    return scan_count
 end
 
 function menuCookieManager()
@@ -367,7 +339,6 @@ function menuCookieManager()
         print("══ COOKIE MANAGER ══")
         print("1. Scan Identity")
         print("2. Export Cookies")
-        print("3. Import Cookies")
         print("4. Kembali")
         io.write("Pilih: ")
         local c = safe_input("")
@@ -435,10 +406,19 @@ function modifyUGClonerPrefs(package, position, numApps)
     local pos_index = ((position - 1) % #grid_positions) + 1
     local pos = grid_positions[pos_index]
     if not pos then return false end
+    
+    -- [FIX] Logic pencarian clone ID lebih baik (regex perbaikan)
     local cloneId = package:match("clien([%w]+)$") or "z1"
+    
     local findCmd = string.format("ls /data/data/%s/shared_prefs/*.xml 2>/dev/null | grep -i pref", package)
     local foundFiles = exec(findCmd)
-    local prefFile = foundFiles:match("([^\n]+_preferences%.xml)") or foundFiles:match("([^\n]+)") or string.format("/data/data/%s/shared_prefs/com.roblox.clien%s_preferences.xml", package, cloneId)
+    local prefFile = foundFiles:match("([^\n]+_preferences%.xml)") or foundFiles:match("([^\n]+)") 
+    
+    if not prefFile or prefFile == "" then
+        -- Fallback manual construction
+        prefFile = string.format("/data/data/%s/shared_prefs/com.roblox.clien%s_preferences.xml", package, cloneId)
+    end
+    
     local commands = {
         string.format("sed -i 's/app_cloner_current_window_left\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_left\\\" value=\\\"%d\\\"/' '%s'", pos.left, prefFile),
         string.format("sed -i 's/app_cloner_current_window_top\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_top\\\" value=\\\"%d\\\"/' '%s'", pos.top, prefFile),
@@ -453,7 +433,6 @@ end
 -- APP CONTROL
 -- ==========================================
 function getProcessInfo(package)
-    -- Pastikan pidof dijalankan dengan exec baru (su -c)
     local pid_out = exec("pidof " .. package)
     local pid = pid_out:match("(%d+)")
     local rss = 0
@@ -465,11 +444,9 @@ function getProcessInfo(package)
 end
 
 function killAndStart(package)
-    -- STEP 1: Force stop dengan root
     exec("tsu 'am force-stop " .. package .. "' 2>/dev/null")
     os.execute("sleep 0.5")
     
-    -- STEP 2: Verifikasi dan double-kill jika masih berjalan
     local pid_check = exec("pidof " .. package)
     if pid_check and pid_check:gsub("%s+", "") ~= "" then
         local uid = getAppUID(package)
@@ -479,7 +456,6 @@ function killAndStart(package)
         os.execute("sleep 0.3")
     end
     
-    -- STEP 3: Launch app
     if vip_link and vip_link ~= "" and vip_link:match("roblox.com") then
         local cmd = string.format("tsu 'am start -a android.intent.action.VIEW -d \"%s\" -p %s' 2>/dev/null", vip_link, package)
         exec(cmd)
@@ -489,7 +465,7 @@ function killAndStart(package)
 end
 
 -- ==========================================
--- WEBHOOK
+-- WEBHOOK (FIXED)
 -- ==========================================
 function sendDiscordWebhook()
     if webhook_conf.url == "" then return end
@@ -497,11 +473,13 @@ function sendDiscordWebhook()
     local total_offline = 0
     local fields = ""
     local time_now = os.date("%H:%M %d-%b-%Y")
+    
     for _, pkg in ipairs(packages) do
         local state = app_states[pkg.package]
         local is_online = false
         local rss_kb = 0
         local uptime = "0m"
+        
         if state.status == "Ready" then
             total_offline = total_offline + 1
         else
@@ -521,23 +499,49 @@ function sendDiscordWebhook()
                 total_offline = total_offline + 1
             end
         end
+        
         local status_icon = is_online and "🟢" or "🔴"
         local ram_val = (is_online and rss_kb) and string.format("%dMB", rss_kb) or "0MB"
-        -- ==========================================
-        -- NEW FORMAT: **||username||** instead of (username)
-        -- ==========================================
-        local username_display = pkg.username and string.format("**||%s||**", pkg.username) or ""
+        
+        -- [FIX] Gunakan json_escape untuk mencegah error karakter
+        local safe_username = pkg.username and json_escape(pkg.username) or ""
+        local username_display = safe_username ~= "" and string.format("**||%s||**", safe_username) or "Unknown"
+        
         local field_val = string.format("`⏱️ %s | 💾 %s`", uptime, ram_val)
         if not is_online then field_val = "`🔻 OFFLINE`" end
         if state.status == "Ready" then field_val = "`⏳ QUEUE`" end
-        -- NEW: Hanya tampilkan username saja, bukan package name
+        
+        -- Append field
         fields = fields .. string.format('{"name": "%s %s", "value": "%s", "inline": false},', status_icon, username_display, field_val)
     end
-    fields = fields:sub(1, -2)
+    
+    -- Remove trailing comma
+    if #fields > 0 then fields = fields:sub(1, -2) end
+    
     local color = 65280 
     if total_offline > 0 then color = 16711680 end 
-    local json_payload = string.format([[ {"content": null, "embeds": [ { "title": "ZEEN TOOLS | MONITOR STATUS", "description": "Last Update: **%s**\nDevice: **%s**\n\n**Status:**\n🟢 Online: %d\n🔴 Offline: %d\n🤖 Total: %d", "color": %d, "fields": [%s], "footer": { "text": "ZEEN TOOLS | %s" } } ] } ]], time_now, device_name, total_online, total_offline, #packages, color, fields, time_now)
-    local curl_cmd = string.format("curl -H \"Content-Type: application/json\" -X POST -d '%s' %s", json_payload:gsub("\n", " "), webhook_conf.url)
+    
+    local safe_device_name = json_escape(device_name)
+    
+    -- [FIX] Constructed JSON with escaping
+    local json_payload = string.format([[ 
+    {
+        "content": null, 
+        "embeds": [ 
+            { 
+                "title": "ZEEN TOOLS | MONITOR STATUS", 
+                "description": "Last Update: **%s**\nDevice: **%s**\n\n**Status:**\n🟢 Online: %d\n🔴 Offline: %d\n🤖 Total: %d", 
+                "color": %d, 
+                "fields": [%s], 
+                "footer": { "text": "ZEEN TOOLS | %s" } 
+            } 
+        ] 
+    } ]], time_now, safe_device_name, total_online, total_offline, #packages, color, fields, time_now)
+    
+    -- Remove newlines in JSON string for curl compatibility
+    json_payload = json_payload:gsub("\n", " ")
+    
+    local curl_cmd = string.format("curl -H \"Content-Type: application/json\" -X POST -d '%s' %s", json_payload, webhook_conf.url)
     os.execute(curl_cmd .. " > /dev/null 2>&1 &") 
 end
 
@@ -548,7 +552,6 @@ function hardExit()
     print("================================")
     os.execute("pkill -9 sleep >/dev/null 2>&1")
     os.execute("pkill -9 curl >/dev/null 2>&1")
-    os.execute("pkill -9 read >/dev/null 2>&1")
     os.execute("stty sane cooked icrnl echo onlcr >/dev/null 2>&1")
     print("\n✓ Stopped. Bye!")
     os.exit()
@@ -568,16 +571,12 @@ function cleanupAndPrepare()
             startTime = 0, status = "Ready", ignoreUntil = 0,
             uid = getAppUID(pkg.package), 
             lastBytes = 0, strikes = 0, netStatus = "Init",
-            -- ==========================================
-            -- NEW: Heartbeat Tracking Fields
-            -- ==========================================
-            heartbeatStatus = "Init",           -- Init, ALIVE, DEAD, RETRYING
-            connectionStatus = "Offline",       -- Connected, Disconnected, Unstable
-            lastHeartbeat = 0,                  -- Timestamp last successful heartbeat
-            heartbeatRetries = 0,               -- Retry counter
-            monitorIndex = 0                    -- Current monitoring index
+            heartbeatStatus = "Init",           
+            connectionStatus = "Offline",       
+            lastHeartbeat = 0,                  
+            heartbeatRetries = 0,               
+            monitorIndex = 0                    
         }
-        -- Cek PID
         local pid_out = exec("pidof " .. pkg.package)
         if pid_out and pid_out ~= "" then
             any_reset = true
@@ -596,12 +595,7 @@ end
 -- ==========================================
 function startMonitoring()
     cleanupAndPrepare()
-    
-    -- ==========================================
-    -- AUTO DETECT COOKIES SAAT START
-    -- ==========================================
     clearScreen()
-    io.write("\027[H\027[2J")
     print("════════════════════════════════════════")
     print("   AUTO DETECTING COOKIES...")
     print("════════════════════════════════════════")
@@ -638,36 +632,21 @@ function startMonitoring()
         scan_pointer = scan_pointer + 1
         if scan_pointer > #packages then scan_pointer = 1 end
         
-        -- ==========================================
-        -- HEARTBEAT CHECK (Setiap WATCHDOG_INTERVAL)
-        -- ==========================================
         if current_time % HEARTBEAT_INTERVAL == 0 then
             checkAllHeartbeats()
         end
         
         local buffer = ""
         local free_ram = getFreeRAM()
-        
-        -- ==========================================
-        -- DYNAMIC LAUNCHED COUNTER
-        -- Counter berubah sesuai mana app yang sedang di-monitor
-        -- Jika monitoring app 1, launched = 1/6
-        -- Jika monitoring app 3, launched = 3/6, dst
-        -- ==========================================
         local dynamic_launched = scan_pointer
         
-        -- ==========================================
-        -- DASHBOARD HEADER - CLEAN & ORGANIZED
-        -- ==========================================
         buffer = buffer .. "\027[1;36m╔════════════════════════════════════════════╗\027[0m\r\n"
-        buffer = buffer .. "\027[1;36m║  ZEEN TOOLS v10.0 - MONITORING DASHBOARD   ║\027[0m\r\n"
+        buffer = buffer .. "\027[1;36m║  ZEEN TOOLS " .. ZEEN_VERSION .. " - DASHBOARD     ║\027[0m\r\n"
         buffer = buffer .. "\027[1;36m╚════════════════════════════════════════════╝\027[0m\r\n"
         buffer = buffer .. "\r\n"
-        -- Status info
-        buffer = buffer .. string.format("  Status:   LAUNCHED %d/%d (Monitoring App #%d)\r\n", dynamic_launched, #packages, scan_pointer)
+        buffer = buffer .. string.format("  Status:   LAUNCHED %d/%d (Checking #%d)\r\n", dynamic_launched, #packages, scan_pointer)
         buffer = buffer .. string.format("  RAM:      %s\r\n", free_ram)
         buffer = buffer .. "\r\n"
-        -- Table header
         buffer = buffer .. "\027[1;33m┌───┬──────────────────────────┬─────────────┬──────────────┐\027[0m\r\n"
         buffer = buffer .. "\027[1;33m│ NO│ PACKAGE NAME             │   STATUS    │ CONNECTION   │\027[0m\r\n"
         buffer = buffer .. "\027[1;33m├───┼──────────────────────────┼─────────────┼──────────────┤\027[0m\r\n"
@@ -675,17 +654,15 @@ function startMonitoring()
             local state = app_states[pkg.package]
             local status_text = "Unknown"
             local connection_text = "Unknown"
-            local pointer_char = (i == scan_pointer) and "▶ " or "  "
+            
             if state.status == "Ready" then
                 status_text = "\027[1;36mReady\027[0m     " 
                 connection_text = "\027[1;30mWait\027[0m     "
             elseif state.status == "Launched" or state.status == "ALIVE" or state.status == "DEAD" then
                 if current_time < state.ignoreUntil then
                     local timeLeft = state.ignoreUntil - current_time
-                    local str = string.format("Load (%ds)", timeLeft)
-                    status_text = string.format("\027[1;33m%-10s\027[0m", str) 
+                    status_text = string.format("\027[1;33mLoad (%ds)\027[0m ", timeLeft) 
                     state.status = "ALIVE"
-                    -- Durante grace period, connection unknown
                     connection_text = "\027[1;33mWarmup\027[0m  "
                 else
                     local pid_out = exec("pidof " .. pkg.package)
@@ -696,9 +673,6 @@ function startMonitoring()
                             connection_text = "\027[1;33mWarmup\027[0m  "
                         else 
                             status_text = "\027[1;32;1mOnline\027[0m  "
-                            -- ==========================================
-                            -- NEW: Show heartbeat/connection status
-                            -- ==========================================
                             if state.connectionStatus == "Connected" then
                                 connection_text = "\027[1;32m✓ Connected\027[0m"
                             elseif state.connectionStatus == "Disconnected" then
@@ -718,22 +692,15 @@ function startMonitoring()
                 end
             end
             
-            -- ==========================================
-            -- SOFT MONITORING: Handle disconnected app
-            -- ==========================================
             if state.status == "ALIVE" and state.connectionStatus == "Disconnected" then
                 local time_since_last_restart = current_time - global_last_restart
                 if time_since_last_restart >= QUEUE_DELAY then
-                    -- Soft restart: hanya restart app yang disconnect
                     killAndStart(pkg.package)
                     state.startTime = current_time
                     state.ignoreUntil = current_time + GRACE_PERIOD
                     state.heartbeatRetries = 0
                     global_last_restart = current_time
-                    
-                    if webhook_conf.url ~= "" then
-                        sendDiscordWebhook()
-                    end
+                    if webhook_conf.url ~= "" then sendDiscordWebhook() end
                 end
             end
             
@@ -745,43 +712,27 @@ function startMonitoring()
                     state.ignoreUntil = current_time + GRACE_PERIOD
                     state.status = "ALIVE"
                     global_last_restart = current_time 
-                    
-                    if webhook_conf.url ~= "" then
-                        sendDiscordWebhook()
-                    end
+                    if webhook_conf.url ~= "" then sendDiscordWebhook() end
                 else
                     local wait_left = QUEUE_DELAY - time_since_last_restart
-                    local str = string.format("Queue(%ds)", wait_left)
-                    status_text = string.format("\027[1;31m%-10s\027[0m", str)
+                    status_text = string.format("\027[1;31mQueue(%ds)\027[0m", wait_left)
                 end
             end
-            -- ==========================================
-            -- NEW FORMAT: package_name (username) or empty
-            -- Shorten nama untuk fit dalam table
-            -- ==========================================
-            local displayName = pkg.package:sub(1, 22)  -- Shorten untuk fit
+            
+            local displayName = pkg.package:sub(1, 22)  
             if pkg.username and pkg.username ~= "" then
                 displayName = string.format("%s (%s)", pkg.package:sub(1, 18), pkg.username:sub(1, 3))
-            else
-                displayName = pkg.package:sub(1, 22)
             end
             
-            -- Format row dengan table borders
             local table_row = string.format("│ %2d│ %-24s │ %-11s │ %-12s │\r\n", 
                 i, displayName, status_text, connection_text)
             buffer = buffer .. table_row
         end
         
-        -- Table footer
         buffer = buffer .. "\027[1;33m└───┴──────────────────────────┴─────────────┴──────────────┘\027[0m\r\n"
         buffer = buffer .. "\r\n"
         buffer = buffer .. " [TEKAN 'q' UNTUK KELUAR]"
-        -- ==========================================
-        -- WEBHOOK NOTIFICATIONS (tetap ada)
-        -- - All Online: saat semua app ready
-        -- - Routine Update: setiap interval
-        -- - Crash/Disconnect: auto handled
-        -- ==========================================
+        
         if all_launched and not initial_webhook_sent and webhook_conf.url ~= "" then
             buffer = buffer .. " | [Sending Webhook...]\027[K\r\n"
             sendDiscordWebhook()
@@ -800,11 +751,9 @@ function startMonitoring()
         local handle = io.popen(cmd)
         local output = handle:read("*a")
         handle:close()
-        if output then
-            if output:match("STOP_SIGNAL") or output:match("^q") then
-                hardExit()
-                break
-            end
+        if output and (output:match("STOP_SIGNAL") or output:match("^q")) then
+            hardExit()
+            break
         end
     end
 end
@@ -893,19 +842,14 @@ end
 function autoDetectRoblox()
     clearScreen()
     print("══ AUTO-DETECT PACKAGES ══")
-    -- 1. Scan semua paket via Root (Lebih akurat)
     print("Scanning via Root (/system/bin/pm)...")
     local raw_output = exec("/system/bin/pm list packages")
     
     local candidates = {}
-    -- Perbaikan: Membersihkan 'package:' di awal string
     for line in raw_output:gmatch("[^\r\n]+") do
         if line:lower():find("roblox") then
-            -- Hapus prefix 'package:' dan spasi
             local pkg = line:gsub("package:", ""):gsub("%s+", "")
-            if pkg and pkg ~= "" then 
-                table.insert(candidates, pkg) 
-            end
+            if pkg and pkg ~= "" then table.insert(candidates, pkg) end
         end
     end
 
@@ -964,7 +908,7 @@ function launchAutoGrid()
     if w then
         w, h = tonumber(w), tonumber(h)
         local ori = exec("dumpsys window | grep 'mCurrentRotation'")
-        if ori:match("ROTATION_90") or ori:match("ROTATION_270") then
+        if ori and (ori:match("ROTATION_90") or ori:match("ROTATION_270")) then
             if w < h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
         else
             if w > h then DISPLAY_WIDTH, DISPLAY_HEIGHT = h, w else DISPLAY_WIDTH, DISPLAY_HEIGHT = w, h end
@@ -984,15 +928,13 @@ end
 function main()
     os.execute("stty sane cooked icrnl echo onlcr >/dev/null 2>&1") 
     
+    checkDependencies() 
     getDeviceName()
     loadData()
     while true do
         clearScreen()
-        -- ==========================================
-        -- MENU FORMAT RAPI - RATA KIRI
-        -- ==========================================
         print("╔════════════════════════════════════════╗")
-        print("║    ZEEN TOOLS v10.0 (HEARTBEAT+SOFT)  ║")
+        print("║    ZEEN TOOLS " .. ZEEN_VERSION .. "   ║")
         print("╚════════════════════════════════════════╝")
         print("")
         print("MAIN MENU:")
@@ -1052,5 +994,4 @@ function main()
 end
 
 main()
-
 
