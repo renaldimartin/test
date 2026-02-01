@@ -1,13 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- ZEEN TOOLS v11.1 (LAUNCH FIX)
+-- ZEEN TOOLS v11.2 (MANAGE FIX)
 -- ==========================================
--- [FIX] LAUNCHER: Menggunakan 'monkey' command agar app pasti terbuka
--- [FIX] PATH: Menggunakan absolute path /system/bin/am
--- [NEW] SYNC MONITOR: Monitoring mengikuti jumlah aplikasi yg terbuka
--- [NEW] DEEPLINK: Auto convert link VIP ke roblox:// (No Browser)
--- [NEW] FAST FLAGS: Auto Low Graphics & 30 FPS Lock
+-- [NEW] DELETE MENU: Bisa hapus per nomor (1,3) atau All
+-- [NEW] ANTI-DUPLICATE: Auto Detect tidak menambah app yg sudah ada
+-- [FIX] LAUNCHER: Menggunakan 'monkey' command (pasti terbuka)
+-- [FIX] SYNC MONITOR: Monitoring rapi mengikuti launch
 -- ==========================================
 
 -- 1. AUTO ROOT LOGIC
@@ -18,7 +17,6 @@ local function check_and_escalate()
     if uid and not uid:match("0") then
         print("\027[1;33m[!] Meminta akses Root (tsu)...\027[0m")
         local script_path = arg[0]
-        -- Pastikan menggunakan lua53
         local cmd = string.format("tsu -c 'lua53 \"%s\"'", script_path)
         os.execute(cmd)
         os.exit()
@@ -45,7 +43,7 @@ local WEBHOOK_FILE = CONFIG_DIR .. "/webhook.txt"
 local VIP_FILE = CONFIG_DIR .. "/vip_link.txt"
 
 -- GLOBAL VARS
-local ZEEN_VERSION = "v11.1 (LAUNCH FIX)"
+local ZEEN_VERSION = "v11.2 (MANAGE FIX)"
 local WATCHDOG_INTERVAL = 1   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
@@ -154,7 +152,6 @@ function convert_to_deeplink(url)
     if placeId and linkCode then
         return string.format("roblox://experiences/start?placeId=%s&linkCode=%s", placeId, linkCode)
     end
-    
     return url 
 end
 
@@ -221,14 +218,12 @@ function fix_cookie_permission(package)
 end
 
 -- ==========================================
--- LAUNCH & KILL LOGIC (CRITICAL FIX)
+-- LAUNCH & KILL LOGIC
 -- ==========================================
 function killAndStart(package)
-    -- 1. Matikan App
     exec("/system/bin/am force-stop " .. package)
     os.execute("sleep 0.5")
     
-    -- 2. Pastikan mati total
     local pid_check = exec("pidof " .. package)
     if pid_check and pid_check:gsub("%s+", "") ~= "" then
         local uid = getAppUID(package)
@@ -236,19 +231,14 @@ function killAndStart(package)
         os.execute("sleep 0.3")
     end
     
-    -- 3. Inject Configs
     inject_fast_flags(package)
     fix_cookie_permission(package)
     
-    -- 4. Launching
     if vip_link and vip_link ~= "" then
-        -- DEEPLINK LAUNCH
         local deeplink = convert_to_deeplink(vip_link)
         local cmd = string.format("/system/bin/am start -a android.intent.action.VIEW -d \"%s\" -p %s", deeplink, package)
         exec(cmd)
     else
-        -- STANDARD LAUNCH (FIXED)
-        -- Menggunakan 'monkey' karena 'am start package' itu INVALID syntax di Android
         local cmd = string.format("/system/bin/monkey -p %s -c android.intent.category.LAUNCHER 1", package)
         exec(cmd)
     end
@@ -296,7 +286,6 @@ function modifyUGClonerPrefs(package, position, numApps)
         string.format("sed -i 's/app_cloner_current_window_bottom\\\" value=\\\"[0-9-]*\\\"/app_cloner_current_window_bottom\\\" value=\\\"%d\\\"/' '%s'", pos.bottom, prefFile),
     }
     for _, cmd in ipairs(commands) do exec(cmd) end
-    
     local uid = getAppUID(package)
     if uid then exec("chown " .. uid .. ":" .. uid .. " " .. prefFile) end
     return true
@@ -394,10 +383,9 @@ function sendDiscordWebhook()
 end
 
 -- ==========================================
--- MONITORING LOOP (SYNC LOGIC)
+-- MONITORING LOOP
 -- ==========================================
 function startMonitoring()
-    -- Initialize State
     for i, pkg in ipairs(packages) do
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
@@ -420,36 +408,30 @@ function startMonitoring()
     while true do
         local current_time = os.time()
         
-        -- === LOGIC 1: LAUNCHER ===
+        -- LAUNCHER
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
-                
                 modifyUGClonerPrefs(pkg.package, launch_queue_index, #packages)
                 killAndStart(pkg.package)
-                
                 app_states[pkg.package].status = "Launched"
                 app_states[pkg.package].startTime = current_time
                 app_states[pkg.package].ignoreUntil = current_time + GRACE_PERIOD
-                
                 launched_count = launched_count + 1
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
             end
         end
         
-        -- === LOGIC 2: HEARTBEAT CHECK ===
+        -- HEARTBEAT
         if current_time % HEARTBEAT_INTERVAL == 0 then
-            for i = 1, launched_count do
-                updateAppHeartbeat(packages[i].package)
-            end
+            for i = 1, launched_count do updateAppHeartbeat(packages[i].package) end
         end
         
-        -- === LOGIC 3: DISPLAY ===
+        -- DISPLAY
         local buffer = ""
         buffer = buffer .. "\027[1;36m╔════ ZEEN TOOLS "..ZEEN_VERSION.." ════╗\027[0m\r\n"
         buffer = buffer .. string.format("  LAUNCHED: %d/%d  |  RAM: %s\r\n", launched_count, #packages, getFreeRAM())
-        
         buffer = buffer .. "\027[1;33m┌───┬──────────────────┬───────────┬──────────────┐\027[0m\r\n"
         buffer = buffer .. "\027[1;33m│ NO│ PACKAGE NAME     │ STATUS    │ CONNECTION   │\027[0m\r\n"
         buffer = buffer .. "\027[1;33m├───┼──────────────────┼───────────┼──────────────┤\027[0m\r\n"
@@ -459,7 +441,6 @@ function startMonitoring()
         for i = 1, display_limit do
             local pkg = packages[i]
             local state = app_states[pkg.package]
-            
             local status_text = "\027[1;30mWaiting...\027[0m"
             local conn_text = " - "
             
@@ -480,7 +461,6 @@ function startMonitoring()
                         conn_text = "\027[1;31m✗Offline\027[0m"
                     end
                 end
-                
                 if state.connectionStatus == "Disconnected" or status_text:match("CRASH") then
                     if current_time - global_last_restart >= QUEUE_DELAY then
                         killAndStart(pkg.package)
@@ -493,10 +473,8 @@ function startMonitoring()
             
             local dname = pkg.package
             if pkg.username then dname = pkg.package.." ("..pkg.username:sub(1,3)..")" end
-            
             buffer = buffer .. string.format("│ %2d│ %-17s│ %-18s│ %-22s│\r\n", i, dname:sub(1,16), status_text, conn_text)
         end
-        
         buffer = buffer .. "\027[1;33m└───┴──────────────────┴───────────┴──────────────┘\027[0m\r\n"
         buffer = buffer .. " [Q] QUIT"
         
@@ -506,9 +484,7 @@ function startMonitoring()
             sendDiscordWebhook(); next_webhook = current_time + webhook_conf.interval
         end
         
-        io.write("\027[H" .. buffer)
-        io.stdout:flush()
-        
+        io.write("\027[H" .. buffer); io.stdout:flush()
         local cmd = "read -t " .. WATCHDOG_INTERVAL .. " input 2>/dev/null; echo $input"
         local handle = io.popen(cmd); local output = handle:read("*a"); handle:close()
         if output and output:match("^[qQ]") then break end
@@ -516,12 +492,83 @@ function startMonitoring()
 end
 
 -- ==========================================
--- MENUS
+-- MENUS & MANAGE
 -- ==========================================
+
+-- [NEW] FUNGSI HAPUS PACKAGE
+function menuDeletePackages()
+    while true do
+        clearScreen()
+        print("══ MANAGE PACKAGES ══")
+        if #packages == 0 then
+            print("  (Empty)")
+        else
+            for i, p in ipairs(packages) do
+                local u = p.username or "-"
+                print(string.format("  [%d] %s (%s)", i, p.package, u))
+            end
+        end
+        print("═════════════════════")
+        print("Options:")
+        print(" - Type 'all' to delete ALL packages")
+        print(" - Type number(s) e.g. '1,3' to delete specific")
+        print(" - Type 'back' to return")
+        
+        io.write("\n>> ")
+        local input = safe_input("")
+        
+        if input == 'back' or input == '' then
+            break
+        elseif input == 'all' then
+            io.write("Confirm delete ALL? (y/n): ")
+            if safe_input("") == "y" then
+                packages = {}
+                saveAll()
+                print("✓ All deleted.")
+                os.execute("sleep 1")
+            end
+        else
+            -- Delete specific indices
+            -- Penting: Hapus dari index terbesar ke terkecil agar urutan tidak bergeser
+            local indices = {}
+            for n in input:gmatch("%d+") do
+                table.insert(indices, tonumber(n))
+            end
+            
+            -- Sort Descending (Besar ke Kecil)
+            table.sort(indices, function(a,b) return a > b end)
+            
+            local deleted_count = 0
+            for _, idx in ipairs(indices) do
+                if packages[idx] then
+                    print(" - Deleting: " .. packages[idx].package)
+                    table.remove(packages, idx)
+                    deleted_count = deleted_count + 1
+                end
+            end
+            
+            if deleted_count > 0 then
+                saveAll()
+                print("✓ Deleted " .. deleted_count .. " packages.")
+                os.execute("sleep 1.5")
+            end
+        end
+    end
+end
+
 function autoDetectRoblox()
     clearScreen()
     print("Scanning packages via Root...")
     local candidates = {}; local seen = {}
+    
+    -- Helper untuk cek apakah package sudah ada di list user
+    local function is_already_added(pkg_name)
+        for _, p in ipairs(packages) do
+            if p.package == pkg_name then return true end
+        end
+        return false
+    end
+
     local raw = exec("pm list packages")
     for line in raw:gmatch("[^\r\n]+") do
         if line:lower():find("roblox") then
@@ -539,20 +586,36 @@ function autoDetectRoblox()
     
     if #candidates==0 then print("No Roblox found."); safe_input("Enter..."); return end
     
-    for i,p in ipairs(candidates) do print(string.format("[%d] %s", i, p)) end
+    print("\nFound Packages:")
+    for i,p in ipairs(candidates) do 
+        local status = is_already_added(p) and "\027[1;32m[ADDED]\027[0m" or ""
+        print(string.format("[%d] %s %s", i, p, status))
+    end
+    
     io.write("\nSelect (e.g., 1,3 or 'all'): "); local c = safe_input("")
     
-    if c=="all" then
-        for _,p in ipairs(candidates) do 
-            table.insert(packages, {name=p, package=p}) 
+    local added_count = 0
+    local function add_safe(pkg_name)
+        if not is_already_added(pkg_name) then
+            table.insert(packages, {name=pkg_name, package=pkg_name})
+            print(" + Added: " .. pkg_name)
+            added_count = added_count + 1
+        else
+            print(" - Skipped (Exists): " .. pkg_name)
         end
+    end
+
+    if c=="all" then
+        for _,p in ipairs(candidates) do add_safe(p) end
     else
         for n in c:gmatch("%d+") do
             local idx = tonumber(n)
-            if candidates[idx] then table.insert(packages, {name=candidates[idx], package=candidates[idx]}) end
+            if candidates[idx] then add_safe(candidates[idx]) end
         end
     end
-    saveAll()
+    
+    if added_count > 0 then saveAll() end
+    safe_input("\nDone. Enter to continue...")
 end
 
 function menuSettings()
@@ -623,14 +686,16 @@ function main()
         print("║ 1. Start Monitor (Sync Mode)   ║")
         print("║ 2. Detect Apps                 ║")
         print("║ 3. Settings (Mute/GFX/Link)    ║")
-        print("║ 4. Exit                        ║")
+        print("║ 4. Manage Packages (Delete)    ║") -- Menu Baru
+        print("║ 5. Exit                        ║")
         print("╚════════════════════════════════╝")
         io.write(">> ")
         local c = safe_input("")
         if c == "1" then startMonitoring()
         elseif c == "2" then autoDetectRoblox()
         elseif c == "3" then menuSettings()
-        elseif c == "4" then break end
+        elseif c == "4" then menuDeletePackages() -- Panggil fungsi baru
+        elseif c == "5" then break end
     end
 end
 
