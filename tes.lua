@@ -1,11 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- ZEEN TOOLS v11.3 (LAUNCH ENGINE FIX)
+-- ZEEN TOOLS v11.4 (HYBRID LAUNCHER FINAL)
 -- ==========================================
--- [FIX] SMART LAUNCH: Deteksi Main Activity otomatis (Resolve Activity)
--- [FIX] MANAGE: Menu hapus package (All/Specific)
--- [FIX] SYNC: Monitoring sinkron dengan proses launch
+-- [FIX] HYBRID LAUNCH: 3 Metode Launch (Activity, Intent, Monkey)
+-- [FIX] SYNC MONITOR: Monitoring sinkron dengan proses launch
+-- [FIX] MANAGE: Delete specific (1,3) atau All
+-- [FIX] DEEPLINK: Auto convert https -> roblox://
+-- [FIX] PERMISSION: Auto chown/chmod cookies & settings
 -- ==========================================
 
 -- 1. AUTO ROOT LOGIC
@@ -16,6 +18,7 @@ local function check_and_escalate()
     if uid and not uid:match("0") then
         print("\027[1;33m[!] Meminta akses Root (tsu)...\027[0m")
         local script_path = arg[0]
+        -- Gunakan lua53 sesuai setup user
         local cmd = string.format("tsu -c 'lua53 \"%s\"'", script_path)
         os.execute(cmd)
         os.exit()
@@ -42,7 +45,7 @@ local WEBHOOK_FILE = CONFIG_DIR .. "/webhook.txt"
 local VIP_FILE = CONFIG_DIR .. "/vip_link.txt"
 
 -- GLOBAL VARS
-local ZEEN_VERSION = "v11.3 (LAUNCH ENGINE)"
+local ZEEN_VERSION = "v11.4 (HYBRID)"
 local WATCHDOG_INTERVAL = 1   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
@@ -94,7 +97,6 @@ function clearScreen()
     io.stdout:flush()
 end
 
--- [IMPORTANT] EXEC wrapper
 function exec(cmd)
     local handle = io.popen(cmd .. ' 2>/dev/null')
     if not handle then return "" end
@@ -156,14 +158,16 @@ function convert_to_deeplink(url)
 end
 
 -- ==========================================
--- CONFIG INJECTOR (GFX & COOKIE)
+-- INJECTORS (GFX & PERMISSIONS)
 -- ==========================================
 function inject_fast_flags(package)
     if not config.low_gfx then return end
+    
     local settings_dir = "/data/data/" .. package .. "/files/ClientSettings"
     local settings_file = settings_dir .. "/ClientAppSettings.json"
     
     exec("mkdir -p " .. settings_dir)
+    
     local json_content = [[
 {
     "DFIntTaskSchedulerTargetFps": 30,
@@ -177,6 +181,7 @@ function inject_fast_flags(package)
     local f = io.open(CONFIG_DIR .. "/temp_ff.json", "w")
     f:write(json_content)
     f:close()
+    
     exec("cp " .. CONFIG_DIR .. "/temp_ff.json " .. settings_file)
     
     local uid = getAppUID(package)
@@ -196,9 +201,12 @@ function fix_cookie_permission(package)
         "/data/data/" .. package .. "/shared_prefs/Cookies",
         "/data/data/" .. package .. "/databases/Cookies"
     }
+    
     for _, p in ipairs(paths) do
-        local f = io.open(p, "r"); if f then f:close(); cookie_path = p; break end
+        local f = io.open(p, "r")
+        if f then f:close(); cookie_path = p; break end
     end
+    
     if cookie_path then
         local uid = getAppUID(package)
         if uid then
@@ -209,28 +217,23 @@ function fix_cookie_permission(package)
 end
 
 -- ==========================================
--- [NEW] LAUNCH ENGINE 
+-- LAUNCHER ENGINE (HYBRID)
 -- ==========================================
-
--- Fungsi untuk mencari Main Activity secara spesifik
 function get_main_activity(package)
-    -- Menggunakan 'cmd package resolve-activity' untuk mencari pintu masuk utama
-    local cmd = string.format("/system/bin/cmd package resolve-activity --brief %s | tail -n 1", package)
+    -- Mencoba mendapatkan Main Activity via cmd package
+    local cmd = string.format("cmd package resolve-activity --brief %s | tail -n 1", package)
     local result = exec(cmd)
-    
-    -- Hasil biasanya: com.package/com.package.MainActivity
     if result and result:match("/") then
-        return result:gsub("%s+", "") -- Hapus spasi/newline
+        return result:gsub("%s+", "")
     end
     return nil
 end
 
 function killAndStart(package)
-    -- 1. Force Stop
-    exec("/system/bin/am force-stop " .. package)
+    -- 1. KILL PROCESS
+    exec("am force-stop " .. package)
     os.execute("sleep 0.5")
     
-    -- 2. Pastikan mati (Kill Zombie Process)
     local pid_check = exec("pidof " .. package)
     if pid_check and pid_check:gsub("%s+", "") ~= "" then
         local uid = getAppUID(package)
@@ -238,29 +241,32 @@ function killAndStart(package)
         os.execute("sleep 0.3")
     end
     
-    -- 3. Inject Settings
+    -- 2. INJECT
     inject_fast_flags(package)
     fix_cookie_permission(package)
     
-    -- 4. LAUNCHING LOGIC
+    -- 3. LAUNCH LOGIC
     if vip_link and vip_link ~= "" then
-        -- Jika ada VIP Link, gunakan Deeplink
+        -- MODE 1: DEEPLINK (Link PS)
         local deeplink = convert_to_deeplink(vip_link)
-        local cmd = string.format("/system/bin/am start -W -a android.intent.action.VIEW -d \"%s\" -p %s", deeplink, package)
+        -- Gunakan -W (Wait) dan -p (Package)
+        local cmd = string.format("am start -W -a android.intent.action.VIEW -d \"%s\" -p %s", deeplink, package)
         exec(cmd)
     else
-        -- Jika tidak ada link, cari Activity Utama
+        -- MODE 2: NORMAL LAUNCH (Smart Detection)
         local main_activity = get_main_activity(package)
         
         if main_activity then
-            -- METODE 1: Start via Activity (Paling Kuat)
-            -- -W artinya Wait for launch (memastikan terload)
-            local cmd = string.format("/system/bin/am start -W -n %s", main_activity)
-            exec(cmd)
+            -- A. Launch via Activity (Paling Stabil)
+            exec(string.format("am start -n %s", main_activity))
         else
-            -- METODE 2: Fallback ke Monkey (Jika activity tidak ketemu)
-            local cmd = string.format("/system/bin/monkey -p %s -c android.intent.category.LAUNCHER 1", package)
-            exec(cmd)
+            -- B. Launch via Intent Main (Standard)
+            local res = exec(string.format("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p %s", package))
+            
+            -- C. Launch via Monkey (Brute Force Fallback)
+            if res:lower():find("error") or res == "" then
+                exec(string.format("monkey -p %s -c android.intent.category.LAUNCHER 1", package))
+            end
         end
     end
 end
@@ -393,16 +399,18 @@ function sendDiscordWebhook()
 end
 
 -- ==========================================
--- MAIN MONITORING
+-- MONITORING LOOP
 -- ==========================================
 function startMonitoring()
+    -- Initial Cleanup
     for i, pkg in ipairs(packages) do
         app_states[pkg.package] = { 
             startTime = 0, status = "Ready", ignoreUntil = 0,
             heartbeatStatus = "Init", connectionStatus = "Offline", heartbeatRetries = 0
         }
-        exec("/system/bin/am force-stop " .. pkg.package) 
+        exec("am force-stop " .. pkg.package) 
     end
+
     if config.auto_mute then exec("media volume --set 0") end 
 
     launched_count = 0
