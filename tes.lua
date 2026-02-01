@@ -1,13 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/lua
 
 -- ==========================================
--- ZEEN TOOLS v11.0 (ULTIMATE EDITION)
+-- ZEEN TOOLS v11.1 (LAUNCH FIX)
 -- ==========================================
+-- [FIX] LAUNCHER: Menggunakan 'monkey' command agar app pasti terbuka
+-- [FIX] PATH: Menggunakan absolute path /system/bin/am
 -- [NEW] SYNC MONITOR: Monitoring mengikuti jumlah aplikasi yg terbuka
 -- [NEW] DEEPLINK: Auto convert link VIP ke roblox:// (No Browser)
--- [NEW] COOKIE FIX: Auto Permission Fix (Chown) agar akun terbaca
--- [NEW] FAST FLAGS: Auto Low Graphics & 30 FPS Lock (Hemat RAM)
--- [NEW] AUTO MUTE: Silent mode saat launching
+-- [NEW] FAST FLAGS: Auto Low Graphics & 30 FPS Lock
 -- ==========================================
 
 -- 1. AUTO ROOT LOGIC
@@ -18,6 +18,7 @@ local function check_and_escalate()
     if uid and not uid:match("0") then
         print("\027[1;33m[!] Meminta akses Root (tsu)...\027[0m")
         local script_path = arg[0]
+        -- Pastikan menggunakan lua53
         local cmd = string.format("tsu -c 'lua53 \"%s\"'", script_path)
         os.execute(cmd)
         os.exit()
@@ -44,7 +45,7 @@ local WEBHOOK_FILE = CONFIG_DIR .. "/webhook.txt"
 local VIP_FILE = CONFIG_DIR .. "/vip_link.txt"
 
 -- GLOBAL VARS
-local ZEEN_VERSION = "v11.0 (ULTIMATE)"
+local ZEEN_VERSION = "v11.1 (LAUNCH FIX)"
 local WATCHDOG_INTERVAL = 1   
 local GRACE_PERIOD = 90       
 local QUEUE_DELAY = 30        
@@ -61,15 +62,14 @@ local DISPLAY_HEIGHT = 720
 local packages = {}
 local app_states = {} 
 local global_last_restart = 0 
-local config = { delay = 15, low_gfx = true, auto_mute = true } -- Default configs
+local config = { delay = 15, low_gfx = true, auto_mute = true } 
 local webhook_conf = { url = "", interval = 300 } 
 local vip_link = ""
 local device_name = "Android Device"
 
--- VARS PENGONTROL SYNC MONITORING
-local launched_count = 0        -- Berapa app yang sudah diluncurkan
-local launch_queue_index = 1    -- App mana yang akan diluncurkan berikutnya
-local next_launch_time = 0      -- Kapan app berikutnya boleh jalan
+local launched_count = 0        
+local launch_queue_index = 1    
+local next_launch_time = 0      
 
 -- ==========================================
 -- HELPER FUNCTIONS
@@ -142,27 +142,24 @@ function json_escape(str)
 end
 
 -- ==========================================
--- [NEW] DEEPLINK CONVERTER
+-- DEEPLINK CONVERTER
 -- ==========================================
 function convert_to_deeplink(url)
     if not url or url == "" then return "" end
-    -- Jika sudah format deeplink, kembalikan
     if url:match("^roblox://") then return url end
     
-    -- Parsing URL Biasa
     local placeId = url:match("games/(%d+)")
     local linkCode = url:match("privateServerLinkCode=([%w%-]+)")
     
     if placeId and linkCode then
-        -- Format Deeplink Android
         return string.format("roblox://experiences/start?placeId=%s&linkCode=%s", placeId, linkCode)
     end
     
-    return url -- Fallback jika parsing gagal
+    return url 
 end
 
 -- ==========================================
--- [NEW] FAST FLAGS (LOW GFX)
+-- FAST FLAGS (LOW GFX)
 -- ==========================================
 function inject_fast_flags(package)
     if not config.low_gfx then return end
@@ -170,10 +167,8 @@ function inject_fast_flags(package)
     local settings_dir = "/data/data/" .. package .. "/files/ClientSettings"
     local settings_file = settings_dir .. "/ClientAppSettings.json"
     
-    -- Buat folder jika belum ada
     exec("mkdir -p " .. settings_dir)
     
-    -- JSON untuk Low Graphics & FPS Cap
     local json_content = [[
 {
     "DFIntTaskSchedulerTargetFps": 30,
@@ -184,14 +179,12 @@ function inject_fast_flags(package)
     "DFIntTaskSchedulerLimitTargetFps": 30
 }
 ]]
-    -- Tulis file
     local f = io.open(CONFIG_DIR .. "/temp_ff.json", "w")
     f:write(json_content)
     f:close()
     
     exec("cp " .. CONFIG_DIR .. "/temp_ff.json " .. settings_file)
     
-    -- [CRITICAL] Fix Permission agar bisa dibaca app
     local uid = getAppUID(package)
     if uid then
         exec("chown " .. uid .. ":" .. uid .. " -R " .. settings_dir)
@@ -202,10 +195,9 @@ function inject_fast_flags(package)
 end
 
 -- ==========================================
--- [NEW] COOKIE PERMISSION FIXER
+-- COOKIE PERMISSION FIXER
 -- ==========================================
 function fix_cookie_permission(package)
-    -- Cari lokasi cookie
     local cookie_path = nil
     local paths = {
         "/data/data/" .. package .. "/app_webview/Default/Cookies",
@@ -222,19 +214,18 @@ function fix_cookie_permission(package)
     if cookie_path then
         local uid = getAppUID(package)
         if uid then
-            -- [CRITICAL] Kembalikan kepemilikan file dari Root ke App User
             exec("chown " .. uid .. ":" .. uid .. " " .. cookie_path)
-            exec("chmod 600 " .. cookie_path) -- Read/Write owner only
+            exec("chmod 600 " .. cookie_path) 
         end
     end
 end
 
 -- ==========================================
--- LAUNCH & KILL LOGIC
+-- LAUNCH & KILL LOGIC (CRITICAL FIX)
 -- ==========================================
 function killAndStart(package)
     -- 1. Matikan App
-    exec("am force-stop " .. package)
+    exec("/system/bin/am force-stop " .. package)
     os.execute("sleep 0.5")
     
     -- 2. Pastikan mati total
@@ -245,21 +236,21 @@ function killAndStart(package)
         os.execute("sleep 0.3")
     end
     
-    -- 3. [NEW] Inject Low GFX Fast Flags
+    -- 3. Inject Configs
     inject_fast_flags(package)
-    
-    -- 4. [NEW] Fix Cookie Permissions (Prevent Logout)
     fix_cookie_permission(package)
     
-    -- 5. Launching
+    -- 4. Launching
     if vip_link and vip_link ~= "" then
-        -- [NEW] Gunakan Deeplink
+        -- DEEPLINK LAUNCH
         local deeplink = convert_to_deeplink(vip_link)
-        -- Gunakan flag -p package agar tidak nyasar ke browser/app lain
-        local cmd = string.format("am start -a android.intent.action.VIEW -d \"%s\" -p %s", deeplink, package)
+        local cmd = string.format("/system/bin/am start -a android.intent.action.VIEW -d \"%s\" -p %s", deeplink, package)
         exec(cmd)
     else
-        exec("am start " .. package)
+        -- STANDARD LAUNCH (FIXED)
+        -- Menggunakan 'monkey' karena 'am start package' itu INVALID syntax di Android
+        local cmd = string.format("/system/bin/monkey -p %s -c android.intent.category.LAUNCHER 1", package)
+        exec(cmd)
     end
 end
 
@@ -306,7 +297,6 @@ function modifyUGClonerPrefs(package, position, numApps)
     }
     for _, cmd in ipairs(commands) do exec(cmd) end
     
-    -- Fix permission prefs
     local uid = getAppUID(package)
     if uid then exec("chown " .. uid .. ":" .. uid .. " " .. prefFile) end
     return true
@@ -373,7 +363,7 @@ function sendDiscordWebhook()
     local total_online = 0; local total_offline = 0; local fields = ""
     local time_now = os.date("%H:%M")
     
-    for i = 1, launched_count do -- Hanya kirim yang sudah launch
+    for i = 1, launched_count do 
         local pkg = packages[i]
         local state = app_states[pkg.package]
         local is_online = false; local rss_kb = 0; local uptime = "0m"
@@ -414,10 +404,10 @@ function startMonitoring()
             heartbeatStatus = "Init", connectionStatus = "Offline",       
             heartbeatRetries = 0
         }
-        exec("am force-stop " .. pkg.package) -- Reset all at start
+        exec("/system/bin/am force-stop " .. pkg.package) 
     end
 
-    if config.auto_mute then exec("media volume --set 0") end -- Mute Audio
+    if config.auto_mute then exec("media volume --set 0") end 
 
     launched_count = 0
     launch_queue_index = 1
@@ -430,21 +420,18 @@ function startMonitoring()
     while true do
         local current_time = os.time()
         
-        -- === LOGIC 1: LAUNCHER (SI TANGAN) ===
+        -- === LOGIC 1: LAUNCHER ===
         if launch_queue_index <= #packages then
             if current_time >= next_launch_time then
                 local pkg = packages[launch_queue_index]
                 
-                -- Action Launch
                 modifyUGClonerPrefs(pkg.package, launch_queue_index, #packages)
                 killAndStart(pkg.package)
                 
-                -- Update State
                 app_states[pkg.package].status = "Launched"
                 app_states[pkg.package].startTime = current_time
                 app_states[pkg.package].ignoreUntil = current_time + GRACE_PERIOD
                 
-                -- Increment Counters
                 launched_count = launched_count + 1
                 launch_queue_index = launch_queue_index + 1
                 next_launch_time = current_time + config.delay
@@ -453,13 +440,12 @@ function startMonitoring()
         
         -- === LOGIC 2: HEARTBEAT CHECK ===
         if current_time % HEARTBEAT_INTERVAL == 0 then
-            -- Hanya cek app yang SUDAH diluncurkan
             for i = 1, launched_count do
                 updateAppHeartbeat(packages[i].package)
             end
         end
         
-        -- === LOGIC 3: DISPLAY (SI MATA) ===
+        -- === LOGIC 3: DISPLAY ===
         local buffer = ""
         buffer = buffer .. "\027[1;36m╔════ ZEEN TOOLS "..ZEEN_VERSION.." ════╗\027[0m\r\n"
         buffer = buffer .. string.format("  LAUNCHED: %d/%d  |  RAM: %s\r\n", launched_count, #packages, getFreeRAM())
@@ -468,12 +454,7 @@ function startMonitoring()
         buffer = buffer .. "\027[1;33m│ NO│ PACKAGE NAME     │ STATUS    │ CONNECTION   │\027[0m\r\n"
         buffer = buffer .. "\027[1;33m├───┼──────────────────┼───────────┼──────────────┤\027[0m\r\n"
         
-        -- HANYA TAMPILKAN APP YANG SUDAH/SEDANG DIPROSES
-        -- Jika launched_count = 1, loop ini hanya jalan 1 kali.
-        -- Jika launched_count = 6, loop jalan 6 kali.
-        -- Sisa app (yg belum launch) tidak ditampilkan atau ditampilkan status WAIT
-        
-        local display_limit = #packages -- Tampilkan semua list, tapi status beda
+        local display_limit = #packages 
         
         for i = 1, display_limit do
             local pkg = packages[i]
@@ -483,7 +464,6 @@ function startMonitoring()
             local conn_text = " - "
             
             if i <= launched_count then
-                -- Logic tampilan untuk app yg sudah launch
                 if current_time < state.ignoreUntil then
                     local left = state.ignoreUntil - current_time
                     status_text = string.format("\027[1;33mLoad(%ds)\027[0m", left)
@@ -501,7 +481,6 @@ function startMonitoring()
                     end
                 end
                 
-                -- AUTO RESTART LOGIC
                 if state.connectionStatus == "Disconnected" or status_text:match("CRASH") then
                     if current_time - global_last_restart >= QUEUE_DELAY then
                         killAndStart(pkg.package)
@@ -551,7 +530,7 @@ function autoDetectRoblox()
         end
     end
     if #candidates==0 then
-        raw = exec("ls /data/data | grep roblox") -- Fallback
+        raw = exec("ls /data/data | grep roblox") 
         for line in raw:gmatch("[^\r\n]+") do
             local p = line:gsub("%s+", "")
             if not seen[p] then table.insert(candidates, p); seen[p]=true end
@@ -598,7 +577,6 @@ function menuSettings()
 end
 
 function loadData()
-    -- Load Packages
     local f = io.open(PACKAGE_FILE, "r")
     if f then
         packages = {}
@@ -608,7 +586,6 @@ function loadData()
         end
         f:close()
     end
-    -- Load Config
     f = io.open(CONFIG_FILE, "r")
     if f then
         for line in f:lines() do
@@ -621,7 +598,6 @@ function loadData()
         end
         f:close()
     end
-    -- VIP & Webhook
     f = io.open(VIP_FILE, "r"); if f then vip_link=f:read("*a"):gsub("\n",""); f:close() end
     f = io.open(WEBHOOK_FILE, "r"); if f then webhook_conf.url=f:read("*l") or ""; f:close() end
 end
@@ -639,9 +615,6 @@ function saveAll()
     f = io.open(WEBHOOK_FILE, "w"); f:write(webhook_conf.url); f:close()
 end
 
--- ==========================================
--- MAIN
--- ==========================================
 function main()
     loadData()
     while true do
